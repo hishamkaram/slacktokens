@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha1" //nolint:gosec
+	"crypto/sha1" //nolint:gosec // #nosec G505 -- Chromium PBKDF2 mandates SHA-1; interop, not a security choice.
 	"errors"
 	"fmt"
 
@@ -98,29 +98,4 @@ func pkcs7Unpad(b []byte, blockSize int) ([]byte, error) {
 		}
 	}
 	return b[:len(b)-pad], nil
-}
-
-// pkcs7Pad is exposed for tests that need to construct a v10 fixture.
-func pkcs7Pad(b []byte, blockSize int) []byte {
-	pad := blockSize - len(b)%blockSize
-	out := make([]byte, len(b)+pad)
-	copy(out, b)
-	padByte := byte(pad & 0xFF)
-	for i := len(b); i < len(out); i++ {
-		out[i] = padByte
-	}
-	return out
-}
-
-// encryptCookieValueV10 is for tests only — produces a fixture row that
-// decryptCookieValue can round-trip.
-func encryptCookieValueV10(plaintext, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	padded := pkcs7Pad(plaintext, aes.BlockSize)
-	enc := make([]byte, len(padded))
-	cipher.NewCBCEncrypter(block, chromiumIV).CryptBlocks(enc, padded)
-	return append([]byte("v10"), enc...), nil
 }
