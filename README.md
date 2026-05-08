@@ -90,7 +90,7 @@ slacktokens -tokens | jq 'keys'
 slacktokens -cookie | jq -r .value
 ```
 
-Use the credentials with `curl`:
+Use the credentials with `curl` (bash):
 
 ```sh
 TOKEN=$(slacktokens -tokens | jq -r '.["https://your-workspace.slack.com"].token')
@@ -98,6 +98,15 @@ DCOOKIE=$(slacktokens -cookie | jq -r .value)
 curl 'https://slack.com/api/auth.test' \
   -d "token=$TOKEN" \
   --cookie "d=$DCOOKIE"
+```
+
+PowerShell:
+
+```powershell
+$tokens = slacktokens -tokens | ConvertFrom-Json
+$token  = $tokens.'https://your-workspace.slack.com'.token
+$dcookie = (slacktokens -cookie | ConvertFrom-Json).value
+curl.exe 'https://slack.com/api/auth.test' -d "token=$token" --cookie "d=$dcookie"
 ```
 
 ## How it works
@@ -123,16 +132,39 @@ go test ./...                                      # unit + mock-pipeline tests;
 SLACKTOKENS_LIVE=1 go test -tags=integration -v    # end-to-end against your machine's Slack profile
 ```
 
-Live integration is opt-in: it reads your real tokens and triggers the OS keychain prompt. CI runs unit tests only.
+Live integration is opt-in: it reads your real tokens and triggers the OS keychain prompt (or DPAPI on Windows). CI runs unit tests + the mock pipeline only.
 
 ## Development
 
-Install the toolchain and the git hooks:
+Install the toolchain and the git hooks.
+
+macOS:
 
 ```sh
 brew install lefthook golangci-lint
 go install golang.org/x/vuln/cmd/govulncheck@latest
+lefthook install
+```
 
+Linux:
+
+```sh
+# golangci-lint
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.11.3
+# lefthook
+go install github.com/evilmartians/lefthook@latest
+go install golang.org/x/vuln/cmd/govulncheck@latest
+lefthook install
+```
+
+Windows (PowerShell):
+
+```powershell
+# golangci-lint
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.3
+# lefthook
+go install github.com/evilmartians/lefthook@latest
+go install golang.org/x/vuln/cmd/govulncheck@latest
 lefthook install
 ```
 
@@ -141,7 +173,7 @@ Hooks:
 - **pre-commit** runs `gofmt -l`, `go vet`, and `golangci-lint`.
 - **pre-push** runs `go test -race` and `govulncheck`.
 
-CI mirrors these checks plus a `gosec` job and a 2×3 matrix of Go versions across Ubuntu and macOS.
+CI mirrors these checks plus a `gosec` job, plus a `lint` matrix across Linux/macOS/Windows targets, plus a `test` matrix of 3 Go versions × 3 OSes.
 
 ## License
 
