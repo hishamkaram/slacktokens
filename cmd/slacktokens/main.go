@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Hesham Karm
+// Derived from slacktokens (Python, GPL-3.0) by Heath Raftery, 2021.
+
 // Command slacktokens prints the Slack workspace tokens and authentication
 // cookies extracted from the desktop app's local storage as JSON.
 //

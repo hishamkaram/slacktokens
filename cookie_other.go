@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Hesham Karm
+
 //go:build !darwin && !linux
 
 package slacktokens

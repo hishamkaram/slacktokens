@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Hesham Karm
+// Derived from slacktokens (Python, GPL-3.0) by Heath Raftery, 2021.
+
 package slacktokens
 
 // SHA-1 is fixed by Chromium's PBKDF2 parameters; this is interop, not a

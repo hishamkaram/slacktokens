@@ -2,7 +2,9 @@
 
 Extract personal Slack workspace tokens (`xoxc-...`) and the authentication cookies (`d`, `d-s`) from the Slack desktop app's local storage.
 
-Go port of [hraftery/slacktokens](https://github.com/hraftery/slacktokens) (Python). Same scope, same license (GPLv3), with verified-against-current-Chromium crypto plus the test suite the original lacks.
+Copyright (C) 2026 Hesham Karm. Released under [GPL-3.0-or-later](./LICENSE).
+
+This is a Go port of [hraftery/slacktokens](https://github.com/hraftery/slacktokens) — the original Python implementation by Heath Raftery (2021). The port matches the upstream public surface, ships a CLI, and adds verified-against-current-Chromium crypto plus the test suite the original lacks. Per GPLv3, the upstream copyright is preserved and this port is also distributed under GPLv3.
 
 > Not endorsed or authorised by Slack Technologies LLC.
 
