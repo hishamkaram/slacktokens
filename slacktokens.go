@@ -45,7 +45,7 @@ var (
 )
 
 // GetTokensAndCookie returns the Slack workspace tokens and authentication
-// cookie(s). Slack must be quit before calling.
+// cookie(s). Works whether Slack is running or quit.
 func GetTokensAndCookie() (Result, error) {
 	tokens, err := GetTokens()
 	if err != nil {

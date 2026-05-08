@@ -9,10 +9,11 @@
 // It is a Go port of github.com/hraftery/slacktokens (Python, GPLv3) and is
 // itself distributed under GPLv3.
 //
-// Supported platforms: macOS and Linux. Windows is not supported.
+// Supported platforms: macOS, Linux, and Windows.
 //
-// Slack must be quit before calling these functions; the LevelDB store is
-// locked while the app is running.
+// These functions work whether Slack is running or quit. If the LevelDB store
+// is locked by a running Slack, it is snapshot-copied to a temp directory and
+// read from the copy.
 //
 // Example:
 //

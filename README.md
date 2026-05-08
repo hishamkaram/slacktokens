@@ -156,9 +156,11 @@ Built against the official Go SDK (`github.com/modelcontextprotocol/go-sdk@v1.6.
 
 No CGO is required on any platform.
 
-## Important: quit Slack first
+## Running while Slack is open
 
-LevelDB is single-writer; opening the store while Slack is running raises `ErrLocalStorageLocked`. Quit the desktop app before invoking. The same applies to the cookies SQLite file — Chromium holds an exclusive lock while running.
+Works whether Slack is running or quit. If the live LevelDB is locked, the directory is snapshot-copied to a temp location and read from there (LevelDB recovery handles partial log records, so the copy is safe to read). Cookies use SQLite `mode=ro&immutable=1` and never need a snapshot.
+
+In the rare case the snapshot itself can't be read, `ErrLocalStorageLocked` is still returned — quit Slack and retry.
 
 ## Testing
 

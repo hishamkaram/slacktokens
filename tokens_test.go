@@ -80,3 +80,32 @@ func TestReadTokensFrom_BadJSON(t *testing.T) {
 		t.Fatal("expected parse error")
 	}
 }
+
+// Simulates Slack holding the LevelDB lock: a writer keeps the store open
+// while readTokensFrom is invoked. The transparent snapshot fallback should
+// kick in and return the staged data.
+func TestReadTokensFrom_SnapshotFallbackWhenLocked(t *testing.T) {
+	json := `{"teams":{"T1":{"url":"https://a.slack.com","token":"xoxc-1","name":"A"}}}`
+	dir := stageLevelDB(t, append([]byte{0x01}, []byte(json)...))
+
+	// Reopen as writer to acquire the on-disk lock, mirroring a running Slack.
+	holder, err := leveldb.OpenFile(dir, nil)
+	if err != nil {
+		t.Fatalf("acquire lock: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+
+	// Direct open should fail with ErrLocalStorageLocked.
+	if _, err := openAndExtractTokens(dir); err == nil {
+		t.Fatal("expected lock error from direct open while writer holds DB")
+	}
+
+	// readTokensFrom should transparently snapshot and succeed.
+	got, err := readTokensFrom(dir)
+	if err != nil {
+		t.Fatalf("readTokensFrom with locked DB: %v", err)
+	}
+	if got["https://a.slack.com"].Token != "xoxc-1" {
+		t.Fatalf("snapshot read returned unexpected data: %#v", got)
+	}
+}

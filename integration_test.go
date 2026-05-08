@@ -19,8 +19,9 @@ import (
 //
 //	SLACKTOKENS_LIVE=1 go test -tags=integration -run TestLive -v
 //
-// Slack must be quit before running, since LevelDB is locked while it runs.
-// The macOS Keychain or Linux libsecret prompt will appear during execution.
+// Slack may be running or quit; if LevelDB is locked the package falls back
+// to a snapshot copy. The macOS Keychain or Linux libsecret prompt will
+// appear during execution.
 func TestLive(t *testing.T) {
 	if os.Getenv("SLACKTOKENS_LIVE") != "1" {
 		t.Skip("set SLACKTOKENS_LIVE=1 to run against the real Slack profile")
