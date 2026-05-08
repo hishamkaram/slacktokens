@@ -1,0 +1,18 @@
+# Binaries
+/slacktokens
+/cmd/slacktokens/slacktokens
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.out
+coverage.html
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# Local Claude config — don't publish
+.claude/
