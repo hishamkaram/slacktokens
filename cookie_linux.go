@@ -74,7 +74,7 @@ func systemKeychainPassword() (string, error) {
 		}
 	}
 
-	return "", errors.New("Slack Safe Storage not found via libsecret/Secret Service")
+	return "", errors.New("slack Safe Storage not found via libsecret/Secret Service")
 }
 
 // platformCookieKeys derives the v11 AES key from libsecret. Linux Chromium
