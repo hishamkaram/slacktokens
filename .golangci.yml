@@ -1,0 +1,51 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gocritic
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+    - bodyclose
+    - errorlint
+    - copyloopvar
+    - prealloc
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - gocritic
+          - prealloc
+      # G204: subprocess with variable args — false positive on the macOS
+      # /usr/bin/security shell-out, where the variable is a hardcoded
+      # account name from a fixed list.
+      - path: cookie_darwin\.go
+        linters:
+          - gosec
+        text: G204
+      # G404: math/rand is fine for the snippet-extraction fallback;
+      # nothing in this package needs crypto-random outside cookie_chromium.go.
+      - text: G104
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

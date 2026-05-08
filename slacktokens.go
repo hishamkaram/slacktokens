@@ -26,12 +26,18 @@ type Result struct {
 	Cookies []Cookie             `json:"cookies"`
 }
 
+// Sentinel errors returned by package functions; check with errors.Is.
 var (
-	ErrUnsupportedOS      = errors.New("slacktokens: only macOS and Linux are supported")
+	// ErrUnsupportedOS is returned on platforms other than macOS and Linux.
+	ErrUnsupportedOS = errors.New("slacktokens: only macOS and Linux are supported")
+	// ErrLocalStorageLocked is returned when LevelDB is held by a running Slack.
 	ErrLocalStorageLocked = errors.New("slacktokens: Local Storage is locked — have you quit Slack?")
+	// ErrLocalConfigMissing is returned when no localConfig_v2 entry exists.
 	ErrLocalConfigMissing = errors.New("slacktokens: localConfig_v2 not found")
-	ErrLocalConfigParse   = errors.New("slacktokens: localConfig_v2 not in expected format")
-	ErrCookieNotFound     = errors.New("slacktokens: d cookie not found in Slack cookies database")
+	// ErrLocalConfigParse is returned when localConfig_v2 cannot be parsed.
+	ErrLocalConfigParse = errors.New("slacktokens: localConfig_v2 not in expected format")
+	// ErrCookieNotFound is returned when the d cookie row is missing.
+	ErrCookieNotFound = errors.New("slacktokens: d cookie not found in Slack cookies database")
 )
 
 // GetTokensAndCookie returns the Slack workspace tokens and authentication

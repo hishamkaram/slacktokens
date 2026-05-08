@@ -31,11 +31,11 @@ func readTokensFrom(path string) (map[string]Workspace, error) {
 	db, err := leveldb.OpenFile(path, &opt.Options{ReadOnly: true})
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "lock") {
-			return nil, fmt.Errorf("%w: %v", ErrLocalStorageLocked, err)
+			return nil, fmt.Errorf("%w: %w", ErrLocalStorageLocked, err)
 		}
 		return nil, fmt.Errorf("open leveldb at %s: %w", path, err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	iter := db.NewIterator(nil, nil)
 	defer iter.Release()
@@ -57,7 +57,7 @@ func readTokensFrom(path string) (map[string]Workspace, error) {
 
 	cfg, err := parseLocalConfig(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrLocalConfigParse, err)
+		return nil, fmt.Errorf("%w: %w", ErrLocalConfigParse, err)
 	}
 
 	teamsAny, ok := cfg["teams"]

@@ -1,0 +1,26 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: gofmt
+      glob: "*.go"
+      run: |
+        unformatted=$(gofmt -l {staged_files})
+        if [ -n "$unformatted" ]; then
+          echo "These files need gofmt:"
+          echo "$unformatted"
+          exit 1
+        fi
+    - name: govet
+      glob: "*.go"
+      run: go vet ./...
+    - name: golangci-lint
+      glob: "*.go"
+      run: golangci-lint run --new-from-rev=HEAD ./...
+
+pre-push:
+  parallel: false
+  jobs:
+    - name: tests
+      run: go test -race -count=1 ./...
+    - name: govulncheck
+      run: govulncheck ./...

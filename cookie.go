@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 
+	// modernc.org/sqlite registers a pure-Go "sqlite" driver with database/sql.
 	_ "modernc.org/sqlite"
 )
 
@@ -37,7 +38,7 @@ func readCookiesFrom(path string) ([]Cookie, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cookies db: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	metaVersion, err := readCookiesMetaVersion(db)
 	if err != nil {
@@ -53,7 +54,7 @@ func readCookiesFrom(path string) ([]Cookie, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query cookies: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type row struct {
 		host string

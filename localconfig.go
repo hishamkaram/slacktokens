@@ -57,20 +57,20 @@ func parseLocalConfig(raw []byte) (map[string]any, error) {
 			continue
 		}
 
-		if v, err := tryParse(text); err == nil {
+		v, perr := tryParse(text)
+		if perr == nil {
 			return v, nil
-		} else {
-			lastErr = err
 		}
+		lastErr = perr
 
 		if start := strings.IndexByte(text, '{'); start >= 0 {
 			if end := strings.LastIndexByte(text, '}'); end > start {
 				snippet := text[start : end+1]
-				if v, err := tryParse(snippet); err == nil {
+				v, perr := tryParse(snippet)
+				if perr == nil {
 					return v, nil
-				} else {
-					lastErr = err
 				}
+				lastErr = perr
 			}
 		}
 	}
@@ -85,17 +85,18 @@ func parseLocalConfig(raw []byte) (map[string]any, error) {
 // control characters inside string literals (Python json.loads strict=False).
 func tryParse(text string) (map[string]any, error) {
 	var v map[string]any
-	if err := json.Unmarshal([]byte(text), &v); err == nil {
+	err := json.Unmarshal([]byte(text), &v)
+	if err == nil {
 		return v, nil
-	} else if relaxed := relaxControlChars(text); relaxed != text {
-		if err2 := json.Unmarshal([]byte(relaxed), &v); err2 == nil {
-			return v, nil
-		} else {
-			return nil, err2
-		}
-	} else {
+	}
+	relaxed := relaxControlChars(text)
+	if relaxed == text {
 		return nil, err
 	}
+	if err2 := json.Unmarshal([]byte(relaxed), &v); err2 != nil {
+		return nil, err2
+	}
+	return v, nil
 }
 
 // relaxControlChars escapes raw control characters (\x00..\x1F other than

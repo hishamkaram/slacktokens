@@ -1,10 +1,12 @@
 package slacktokens
 
+// SHA-1 is fixed by Chromium's PBKDF2 parameters; this is interop, not a
+// security choice we control. gosec G505 is suppressed via .golangci.yml.
 import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec
 	"errors"
 	"fmt"
 
@@ -19,9 +21,9 @@ var chromiumIV = bytes.Repeat([]byte{0x20}, 16)
 // chromiumSalt is the PBKDF2 salt Chromium uses across all platforms.
 var chromiumSalt = []byte("saltysalt")
 
-// linuxV10Key is the precomputed AES key for Linux v10 cookies.
-//   PBKDF2-HMAC-SHA1("peanuts", "saltysalt", 1, 16)
-// Hardcoded in Chromium's posix_key_provider.cc.
+// linuxV10Key is the precomputed AES key for Linux v10 cookies:
+// PBKDF2-HMAC-SHA1("peanuts", "saltysalt", 1, 16). Hardcoded in
+// Chromium's posix_key_provider.cc.
 var linuxV10Key = []byte{
 	0xfd, 0x62, 0x1f, 0xe5, 0xa2, 0xb4, 0x02, 0x53,
 	0x9d, 0xfa, 0x14, 0x7c, 0xa9, 0x27, 0x27, 0x78,
@@ -103,8 +105,9 @@ func pkcs7Pad(b []byte, blockSize int) []byte {
 	pad := blockSize - len(b)%blockSize
 	out := make([]byte, len(b)+pad)
 	copy(out, b)
+	padByte := byte(pad & 0xFF)
 	for i := len(b); i < len(out); i++ {
-		out[i] = byte(pad)
+		out[i] = padByte
 	}
 	return out
 }

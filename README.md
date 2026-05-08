@@ -120,6 +120,24 @@ SLACKTOKENS_LIVE=1 go test -tags=integration -v    # end-to-end against your mac
 
 Live integration is opt-in: it reads your real tokens and triggers the OS keychain prompt. CI runs unit tests only.
 
+## Development
+
+Install the toolchain and the git hooks:
+
+```sh
+brew install lefthook golangci-lint
+go install golang.org/x/vuln/cmd/govulncheck@latest
+
+lefthook install
+```
+
+Hooks:
+
+- **pre-commit** runs `gofmt -l`, `go vet`, and `golangci-lint`.
+- **pre-push** runs `go test -race` and `govulncheck`.
+
+CI mirrors these checks plus a `gosec` job and a 2×3 matrix of Go versions across Ubuntu and macOS.
+
 ## License
 
 GPL-3.0-or-later. The Python source library is GPLv3, so this port must be GPLv3 as well. See [LICENSE](./LICENSE).

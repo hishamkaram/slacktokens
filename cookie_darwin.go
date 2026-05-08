@@ -41,7 +41,7 @@ func systemKeychainPassword() (string, error) {
 	if lastErr != nil {
 		return "", fmt.Errorf("read Slack Safe Storage from macOS Keychain: %w", lastErr)
 	}
-	return "", errors.New("Slack Safe Storage not found in Keychain (Slack may not be installed)")
+	return "", errors.New("slack Safe Storage not found in Keychain (Slack may not be installed)")
 }
 
 // platformCookieKeys derives the AES key for v10-prefixed cookies on macOS.
