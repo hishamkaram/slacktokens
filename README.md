@@ -109,6 +109,41 @@ $dcookie = (slacktokens -cookie | ConvertFrom-Json).value
 curl.exe 'https://slack.com/api/auth.test' -d "token=$token" --cookie "d=$dcookie"
 ```
 
+## MCP server
+
+A standards-compliant [Model Context Protocol](https://modelcontextprotocol.io) server is shipped under `cmd/slacktokens-mcp/`. It exposes the library as four read-only tools to MCP-capable clients (Claude Code, Claude Desktop, Cursor, etc.) over stdio.
+
+```sh
+go install github.com/hishamkaram/slacktokens/cmd/slacktokens-mcp@latest
+```
+
+Tools:
+
+| Name | Returns |
+| --- | --- |
+| `get_tokens` | `xoxc-*` tokens for every workspace |
+| `get_cookie` | the `d` auth cookie |
+| `get_cookies` | both `d` and `d-s` when present |
+| `get_tokens_and_cookie` | tokens + cookies in one call |
+
+All tools advertise `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. Each tool's title and description flag the result as **sensitive** so a compliant MCP client surfaces a confirmation prompt before invoking. The server also opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
+
+Built against the official Go SDK (`github.com/modelcontextprotocol/go-sdk@v1.6.0`) and the **MCP 2025-11-25** specification.
+
+### Claude Code / Claude Desktop config
+
+```jsonc
+{
+  "mcpServers": {
+    "slacktokens": {
+      "command": "slacktokens-mcp"
+    }
+  }
+}
+```
+
+(Or use the absolute path to the binary if it isn't on PATH.)
+
 ## How it works
 
 1. **Tokens** are read from Slack's Chromium LevelDB localStorage at the OS-specific path; the entry whose key contains `localConfig_v2` is parsed as Chromium-encoded localStorage JSON.

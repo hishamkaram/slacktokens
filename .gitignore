@@ -1,5 +1,6 @@
 # Binaries
 /slacktokens
+/slacktokens-mcp
 /cmd/slacktokens/slacktokens
 *.exe
 *.test
@@ -16,3 +17,4 @@ coverage.html
 
 # Local Claude config — don't publish
 .claude/
+/dist/
