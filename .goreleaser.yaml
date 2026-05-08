@@ -1,0 +1,127 @@
+version: 2
+
+project_name: slacktokens
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: slacktokens
+    main: ./cmd/slacktokens
+    binary: slacktokens
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+
+  - id: slacktokens-mcp
+    main: ./cmd/slacktokens-mcp
+    binary: slacktokens-mcp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    ids: [slacktokens, slacktokens-mcp]
+    name_template: >-
+      {{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: SHA256SUMS.txt
+  algorithm: sha256
+
+nfpms:
+  - id: deb
+    package_name: slacktokens
+    file_name_template: >-
+      {{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    ids: [slacktokens, slacktokens-mcp]
+    vendor: Hesham Karm
+    homepage: https://github.com/hishamkaram/slacktokens
+    maintainer: Hesham Karm <hesham@anymindgroup.com>
+    description: |-
+      Extract Slack workspace tokens (xoxc-) and authentication cookies (xoxd-)
+      from the Slack desktop app's local storage. Go port of hraftery/slacktokens.
+    license: GPL-3.0-or-later
+    formats: [deb]
+    bindir: /usr/bin
+    section: utils
+
+brews:
+  - name: slacktokens
+    ids: [default]
+    repository:
+      owner: hishamkaram
+      name: homebrew-slacktokens
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/hishamkaram/slacktokens
+    description: Extract Slack workspace tokens and authentication cookies from the desktop app
+    license: GPL-3.0-or-later
+    commit_author:
+      name: hishamkaram
+      email: hesham@anymindgroup.com
+    test: |
+      assert_match "Usage of", shell_output("#{bin}/slacktokens --help 2>&1")
+      assert_predicate bin/"slacktokens-mcp", :exist?
+    install: |
+      bin.install "slacktokens"
+      bin.install "slacktokens-mcp"
+
+release:
+  github:
+    owner: hishamkaram
+    name: slacktokens
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"
+  header: |
+    ## slacktokens v{{ .Version }}
+  footer: |
+    ---
+    **Install via Homebrew:**
+    ```sh
+    brew install hishamkaram/slacktokens/slacktokens
+    ```
+
+    **Install via apt (download the .deb):**
+    ```sh
+    curl -fsSLO https://github.com/hishamkaram/slacktokens/releases/download/v{{ .Version }}/slacktokens_v{{ .Version }}_linux_amd64.deb
+    sudo dpkg -i slacktokens_v{{ .Version }}_linux_amd64.deb
+    ```
+
+    **Install via go:**
+    ```sh
+    go install github.com/hishamkaram/slacktokens/cmd/slacktokens@v{{ .Version }}
+    go install github.com/hishamkaram/slacktokens/cmd/slacktokens-mcp@v{{ .Version }}
+    ```
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch

@@ -22,14 +22,26 @@ Windows uses a different crypto path: AES-256-GCM with a master key stored in `L
 
 ## Install
 
+**Homebrew (macOS / Linux):**
+
 ```sh
-go get github.com/hishamkaram/slacktokens
+brew install hishamkaram/slacktokens/slacktokens
 ```
 
-CLI:
+**Debian / Ubuntu (.deb):** download the architecture-matching `.deb` from the [latest release](https://github.com/hishamkaram/slacktokens/releases/latest), then:
 
 ```sh
-go install github.com/hishamkaram/slacktokens/cmd/slacktokens@latest
+sudo dpkg -i slacktokens_v*_linux_amd64.deb   # or linux_arm64.deb
+```
+
+**Pre-built binaries (Windows, or unmanaged Linux/macOS):** download from the [releases page](https://github.com/hishamkaram/slacktokens/releases/latest) and extract.
+
+**Go (library or CLI):**
+
+```sh
+go get github.com/hishamkaram/slacktokens                                # library
+go install github.com/hishamkaram/slacktokens/cmd/slacktokens@latest     # CLI
+go install github.com/hishamkaram/slacktokens/cmd/slacktokens-mcp@latest # MCP server
 ```
 
 ## Library usage
