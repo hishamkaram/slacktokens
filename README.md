@@ -14,9 +14,11 @@ This is a Go port of [hraftery/slacktokens](https://github.com/hraftery/slacktok
 | --- | --- | --- |
 | macOS (Intel + Apple Silicon) | ✅ | ✅ |
 | Linux (libsecret) | ✅ | ✅ |
-| Windows | ❌ (matches Python source — Windows uses DPAPI v20, out of scope) |
+| Windows (DPAPI) | ✅ | ✅ |
 
 Verified against Slack 4.50 / Electron 42 / Chromium 148.
+
+Windows uses a different crypto path: AES-256-GCM with a master key stored in `Local State` and wrapped with DPAPI. Slack's Electron does **not** ship Chromium's v20 "app-bound encryption" infrastructure, so cookies remain v10/v11 — extractable from your own user account without elevation. v20 is detected and rejected with a clear error.
 
 ## Install
 
@@ -101,17 +103,18 @@ curl 'https://slack.com/api/auth.test' \
 ## How it works
 
 1. **Tokens** are read from Slack's Chromium LevelDB localStorage at the OS-specific path; the entry whose key contains `localConfig_v2` is parsed as Chromium-encoded localStorage JSON.
-2. **Cookies** are read from Slack's Chromium SQLite cookies database. The `d` and `d-s` rows for `*.slack.com` are decrypted with AES-128-CBC using a key derived via PBKDF2-HMAC-SHA1 from a password stored in:
-   - macOS: Keychain item `Slack Safe Storage` (account `Slack Key` for direct download or `Slack App Store Key` for App Store).
-   - Linux: libsecret entry `Slack Safe Storage` (via D-Bus Secret Service).
+2. **Cookies** are read from Slack's Chromium SQLite cookies database. The `d` and `d-s` rows for `*.slack.com` are decrypted with:
+   - **macOS**: AES-128-CBC, key from PBKDF2-HMAC-SHA1 (1003 iters) of the macOS Keychain item `Slack Safe Storage` (account `Slack Key` for direct download or `Slack App Store Key` for App Store).
+   - **Linux**: AES-128-CBC, key from libsecret entry `Slack Safe Storage` via D-Bus Secret Service (1 iter PBKDF2). v10 fallback uses Chromium's hardcoded `peanuts`-derived key.
+   - **Windows**: AES-256-GCM, key from `%APPDATA%\Slack\Local State` (`os_crypt.encrypted_key`, base64, `DPAPI` prefix stripped, then `CryptUnprotectData`).
 
    For Chromium ≥ 130 (cookies-DB `meta.version >= 24`), a 32-byte SHA-256 of the host_key is prepended to the plaintext and stripped on decrypt.
 
-No CGO is required.
+No CGO is required on any platform.
 
 ## Important: quit Slack first
 
-LevelDB is single-writer; opening the store while Slack is running raises `ErrLocalStorageLocked`. Quit the desktop app before invoking.
+LevelDB is single-writer; opening the store while Slack is running raises `ErrLocalStorageLocked`. Quit the desktop app before invoking. The same applies to the cookies SQLite file — Chromium holds an exclusive lock while running.
 
 ## Testing
 

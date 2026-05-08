@@ -38,14 +38,15 @@ func deriveKey(password []byte, iterations int) []byte {
 	return pbkdf2.Key(password, chromiumSalt, iterations, 16, sha1.New)
 }
 
-// decryptCookieValue decrypts one Chromium-encrypted cookie value.
+// decryptCookieValueCBC decrypts a Chromium cookie blob using AES-128-CBC,
+// the macOS/Linux scheme.
 //
 // `encrypted` is the raw bytes from the cookies.encrypted_value column.
-// `keyV10` is the AES key to use for v10-prefixed values.
-// `keyV11` is the AES key to use for v11-prefixed values (may be nil on macOS).
-// `metaVersion` is the cookies SQLite meta.version (>=24 means a 32-byte SHA-256
-// of host_key prefixes the plaintext).
-func decryptCookieValue(encrypted, keyV10, keyV11 []byte, metaVersion int) (string, error) {
+// `keyV10` is the AES key for v10-prefixed values.
+// `keyV11` is the AES key for v11-prefixed values (may be nil on macOS).
+// `metaVersion` is the cookies SQLite meta.version (>=24 means a 32-byte
+// SHA-256 of host_key prefixes the plaintext).
+func decryptCookieValueCBC(encrypted, keyV10, keyV11 []byte, metaVersion int) (string, error) {
 	if len(encrypted) < 3 {
 		return "", errors.New("encrypted value too short")
 	}

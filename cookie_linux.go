@@ -77,15 +77,17 @@ func systemKeychainPassword() (string, error) {
 	return "", errors.New("slack Safe Storage not found via libsecret/Secret Service")
 }
 
-// platformCookieKeys derives the v11 AES key from libsecret. Linux Chromium
-// also writes v10-prefixed cookies for users without an unlocked keyring;
-// those use the precomputed linuxV10Key.
-func platformCookieKeys() (keyV10, keyV11 []byte, err error) {
-	pw, err := keychainPasswordFn()
-	if err != nil {
-		// Fall back to v10 only — caller may still be able to decrypt
-		// v10-prefixed rows. Surface the error if no row decrypts later.
-		return linuxV10Key, nil, nil
+// newPlatformDecrypter wires up the Linux cookie decrypt strategy:
+// libsecret password -> PBKDF2(1 iter) -> AES-128-CBC for v11. v10 cookies
+// (rare; written when the keyring is unavailable) use the precomputed
+// linuxV10Key. If libsecret is unreachable we still try v10.
+func newPlatformDecrypter() (cookieDecrypter, error) {
+	keyV10 := linuxV10Key
+	var keyV11 []byte
+	if pw, err := keychainPasswordFn(); err == nil {
+		keyV11 = deriveKey([]byte(pw), 1)
 	}
-	return linuxV10Key, deriveKey([]byte(pw), 1), nil
+	return func(enc []byte, _ string, metaVersion int) (string, error) {
+		return decryptCookieValueCBC(enc, keyV10, keyV11, metaVersion)
+	}, nil
 }

@@ -21,7 +21,7 @@ const localConfigKey = "localConfig_v2"
 // xoxc- token and the workspace's display name. Slack must be quit before
 // calling, since LevelDB is single-writer and locked while Slack is running.
 func GetTokens() (map[string]Workspace, error) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		return nil, ErrUnsupportedOS
 	}
 	path, err := slackLevelDBPath()

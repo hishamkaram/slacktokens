@@ -48,12 +48,16 @@ func systemKeychainPassword() (string, error) {
 	return "", errors.New("slack Safe Storage not found in Keychain (Slack may not be installed)")
 }
 
-// platformCookieKeys derives the AES key for v10-prefixed cookies on macOS.
-// Chromium on macOS only uses the v10 prefix, so keyV11 is nil.
-func platformCookieKeys() (keyV10, keyV11 []byte, err error) {
+// newPlatformDecrypter wires up the macOS cookie decrypt strategy:
+// Keychain password -> PBKDF2(1003 iters) -> AES-128-CBC.
+// Chromium on macOS only uses the v10 prefix, so keyV11 is left nil.
+func newPlatformDecrypter() (cookieDecrypter, error) {
 	pw, err := keychainPasswordFn()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return deriveKey([]byte(pw), 1003), nil, nil
+	keyV10 := deriveKey([]byte(pw), 1003)
+	return func(enc []byte, _ string, metaVersion int) (string, error) {
+		return decryptCookieValueCBC(enc, keyV10, nil, metaVersion)
+	}, nil
 }

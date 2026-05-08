@@ -66,7 +66,7 @@ func stageCookiesDB(t *testing.T, dir string, key []byte, metaVersion int, plain
 
 func TestMockIntegration_FullPipeline(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		t.Skip("only macOS and Linux are supported")
+		t.Skip("CBC mock pipeline runs on darwin/linux; see cookie_windows_test.go for the Windows GCM mock")
 	}
 
 	profile := t.TempDir()
@@ -87,11 +87,20 @@ func TestMockIntegration_FullPipeline(t *testing.T) {
 	keychainPasswordFn = func() (string, error) { return testPassword, nil }
 	defer func() { keychainPasswordFn = prev }()
 
-	// Use the platform's actual key derivation so encryption matches what
-	// platformCookieKeys() will produce at decrypt time.
-	keyV10, _, err := platformCookieKeys()
-	if err != nil {
-		t.Fatalf("platformCookieKeys: %v", err)
+	// Derive the same key the platform decrypter will use, so the staged
+	// fixture decrypts cleanly. macOS uses 1003 iters; Linux's v10 path uses
+	// the precomputed linuxV10Key (matches deriveKey("peanuts", 1)) — but
+	// since we control the password here, just derive with the platform's
+	// iteration count.
+	iters := 1
+	if runtime.GOOS == "darwin" {
+		iters = 1003
+	}
+	keyV10 := deriveKey([]byte(testPassword), iters)
+	if runtime.GOOS == "linux" {
+		// Linux path always tries linuxV10Key for v10 rows regardless of
+		// password availability; encrypt with that key instead.
+		keyV10 = linuxV10Key
 	}
 	stageCookiesDB(t, profile, keyV10, 24, "xoxd-test")
 

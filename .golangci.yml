@@ -40,6 +40,17 @@ linters:
       - text: G104
         linters:
           - gosec
+      # Windows DPAPI requires Win32 syscalls via unsafe.Pointer / uintptr —
+      # gosec G103 (unsafe), G115 (int->uint32) are inherent to syscall.Call.
+      - path: dpapi_windows\.go
+        linters:
+          - gosec
+      # Reading the Local State file from a path computed from $APPDATA is the
+      # whole point — gosec G304 (file inclusion via variable) is expected.
+      - path: cookie_windows\.go
+        linters:
+          - gosec
+        text: G304
 
 formatters:
   enable:

@@ -26,7 +26,7 @@ var keychainPasswordFn = systemKeychainPassword
 // GetCookies returns every Slack authentication cookie known to the desktop
 // app's cookies database — the `d` cookie always, and `d-s` when present.
 func GetCookies() ([]Cookie, error) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		return nil, ErrUnsupportedOS
 	}
 	path, err := slackCookiesPath()
@@ -35,6 +35,12 @@ func GetCookies() ([]Cookie, error) {
 	}
 	return readCookiesFrom(path)
 }
+
+// cookieDecrypter decrypts one row from the Chromium cookies table.
+// It is platform-specific because macOS/Linux use AES-128-CBC keyed from a
+// keychain/libsecret password, whereas Windows uses AES-256-GCM keyed from a
+// DPAPI-wrapped value in Local State.
+type cookieDecrypter func(enc []byte, hostKey string, metaVersion int) (string, error)
 
 func readCookiesFrom(path string) ([]Cookie, error) {
 	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1", url.PathEscape(path))
@@ -80,7 +86,7 @@ func readCookiesFrom(path string) ([]Cookie, error) {
 		return nil, ErrCookieNotFound
 	}
 
-	keyV10, keyV11, err := platformCookieKeys()
+	decrypt, err := newPlatformDecrypter()
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +94,7 @@ func readCookiesFrom(path string) ([]Cookie, error) {
 	out := make([]Cookie, 0, len(raw))
 	var lastErr error
 	for _, r := range raw {
-		val, err := decryptCookieValue(r.enc, keyV10, keyV11, metaVersion)
+		val, err := decrypt(r.enc, r.host, metaVersion)
 		if err != nil {
 			lastErr = fmt.Errorf("decrypt %s: %w", r.name, err)
 			continue

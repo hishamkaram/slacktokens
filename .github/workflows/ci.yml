@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         go: ["1.22", "1.23", "1.24"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -28,7 +28,17 @@ jobs:
       - run: go test -race -count=1 ./...
 
   lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lint each target so build-tagged files (cookie_darwin.go,
+        # cookie_linux.go, cookie_windows.go, dpapi_windows.go) are all
+        # exercised. golangci-lint only sees files that match the build
+        # constraints of the current GOOS.
+        goos: [linux, darwin, windows]
     runs-on: ubuntu-latest
+    env:
+      GOOS: ${{ matrix.goos }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

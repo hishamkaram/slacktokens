@@ -42,6 +42,14 @@ func slackProfileDir() (string, error) {
 		return direct, nil
 	case "linux":
 		return filepath.Join(home, ".config", "Slack"), nil
+	case "windows":
+		// On Windows Slack stores everything under %APPDATA%\Slack, which is
+		// %USERPROFILE%\AppData\Roaming\Slack. Honor APPDATA when set,
+		// otherwise compute from home.
+		if appdata := os.Getenv("APPDATA"); appdata != "" {
+			return filepath.Join(appdata, "Slack"), nil
+		}
+		return filepath.Join(home, "AppData", "Roaming", "Slack"), nil
 	default:
 		return "", ErrUnsupportedOS
 	}
