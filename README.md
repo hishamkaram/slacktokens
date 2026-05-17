@@ -123,24 +123,46 @@ curl.exe 'https://slack.com/api/auth.test' -d "token=$token" --cookie "d=$dcooki
 
 ## MCP server
 
-A standards-compliant [Model Context Protocol](https://modelcontextprotocol.io) server is shipped under `cmd/slacktokens-mcp/`. It exposes the library as four read-only tools to MCP-capable clients (Claude Code, Claude Desktop, Cursor, etc.) over stdio.
+A standards-compliant [Model Context Protocol](https://modelcontextprotocol.io) server is shipped under `cmd/slacktokens-mcp/`. It exposes the library to MCP-capable clients (Claude Code, Claude Desktop, Cursor, etc.) over stdio.
 
 ```sh
 go install github.com/hishamkaram/slacktokens/cmd/slacktokens-mcp@latest
+```
+
+### Secure by default — credentials never enter the AI's context
+
+A Slack token or auth cookie is a live credential. Returning one in a tool result would drop it into the calling model's context window, its transcript, and any provider-side logs — a sensitive-information-disclosure risk. So the MCP server is **masked by default**:
+
+- The four read tools return only a **masked preview** (e.g. `xoxc-2…3f9a`) — enough for a human to recognise their own credential, useless as a credential itself — plus workspace/cookie metadata.
+- To hand over **real, usable credentials**, call `write_credentials_file`. It writes them to a freshly created local file readable only by your OS user (mode `0600`) and returns **only the path** — the credential values never enter the model context. The file is removed when the server stops.
+
+The credentials file holds the same JSON as `slacktokens` with no flags — `{ "tokens": …, "cookie": …, "cookies": … }` — so you or a script can consume it directly:
+
+```sh
+TOKEN=$(jq -r '.tokens["https://your-workspace.slack.com"].token' "$CREDS_FILE")
+DCOOKIE=$(jq -r '.cookie.value' "$CREDS_FILE")
+curl 'https://slack.com/api/auth.test' -d "token=$TOKEN" --cookie "d=$DCOOKIE"
 ```
 
 Tools:
 
 | Name | Returns |
 | --- | --- |
-| `get_tokens` | `xoxc-*` tokens for every workspace |
-| `get_cookie` | the `d` auth cookie |
-| `get_cookies` | both `d` and `d-s` when present |
-| `get_tokens_and_cookie` | tokens + cookies in one call |
+| `get_tokens` | per-workspace name + **masked** `xoxc-*` token preview |
+| `get_cookie` | the `d` auth cookie, **masked** |
+| `get_cookies` | `d` and `d-s` (when present), **masked** |
+| `get_tokens_and_cookie` | masked tokens + cookies in one call |
+| `write_credentials_file` | path to a `0600` JSON file holding the real credentials |
 
-All tools advertise `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. Each tool's title and description flag the result as **sensitive** so a compliant MCP client surfaces a confirmation prompt before invoking. The server also opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
+The four read tools advertise `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. `write_credentials_file` advertises `readOnlyHint: false` and `idempotentHint: false` (it creates a file) and is otherwise non-destructive and offline. The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
 
 Built against the official Go SDK (`github.com/modelcontextprotocol/go-sdk@v1.6.0`) and the **MCP 2025-11-25** specification.
+
+> Note: file handoff keeps secrets out of the model context, transcript, and logs. An agent that *also* has shell/file-read tools can still be explicitly instructed to open the file — that is a deliberate user-directed act, not the silent exposure this design prevents.
+
+### Opting in to raw output
+
+If you understand the exposure and still want the read tools to inline raw `xoxc-*` tokens and cookie values (the previous behaviour), start the server with the `SLACKTOKENS_MCP_ALLOW_RAW=1` environment variable. Leaving it unset keeps every read tool masked.
 
 ### Claude Code / Claude Desktop config
 
@@ -149,6 +171,19 @@ Built against the official Go SDK (`github.com/modelcontextprotocol/go-sdk@v1.6.
   "mcpServers": {
     "slacktokens": {
       "command": "slacktokens-mcp"
+    }
+  }
+}
+```
+
+To opt in to raw output, add the environment variable:
+
+```jsonc
+{
+  "mcpServers": {
+    "slacktokens": {
+      "command": "slacktokens-mcp",
+      "env": { "SLACKTOKENS_MCP_ALLOW_RAW": "1" }
     }
   }
 }

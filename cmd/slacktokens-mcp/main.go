@@ -3,9 +3,8 @@
 // Derived from slacktokens (Python, GPL-3.0) by Heath Raftery, 2021.
 
 // Command slacktokens-mcp is a Model Context Protocol (MCP) server that
-// exposes the slacktokens library as four read-only tools, suitable for
-// being launched by an MCP-capable client (Claude Code, Claude Desktop,
-// Cursor, etc.) over the stdio transport.
+// exposes the slacktokens library to an MCP-capable client (Claude Code,
+// Claude Desktop, Cursor, etc.) over the stdio transport.
 //
 // The server complies with the 2025-11-25 MCP specification:
 //
@@ -17,17 +16,34 @@
 //   - The `logging` capability is NOT advertised, so secrets cannot leak via
 //     `notifications/message`. Diagnostic logs go to stderr only.
 //
-// SECURITY: every tool returns Slack credentials. The descriptions are
-// deliberately written to be "scary" so an MCP client surfaces the
-// sensitivity to the user before invoking. Do not expose this server over
-// HTTP, network, or any non-stdio transport.
+// SECURITY: a Slack token or auth cookie is a live credential. Returning one
+// in a tool result would place it in the calling model's context window, its
+// transcript, and any provider-side logs — a sensitive-information-disclosure
+// risk. Therefore:
+//
+//   - The four read tools (get_tokens, get_cookie, get_cookies,
+//     get_tokens_and_cookie) return only MASKED previews by default. The
+//     preview is enough for a human to recognise their credential but is not
+//     itself usable.
+//   - To obtain real, usable credentials, call write_credentials_file: it
+//     writes them to a local file readable only by the current OS user (mode
+//     0600) and returns ONLY the path. The credential values never enter the
+//     model context.
+//   - Setting the env var SLACKTOKENS_MCP_ALLOW_RAW=1 is a deliberate,
+//     documented opt-out that inlines raw values into the read tools again.
+//
+// Do not expose this server over HTTP, network, or any non-stdio transport.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -44,33 +60,89 @@ type (
 	noArgs struct{}
 
 	tokensOutput struct {
-		Tokens map[string]workspace `json:"tokens" jsonschema:"map keyed by Slack workspace URL"`
+		Tokens map[string]maskedWorkspace `json:"tokens" jsonschema:"map keyed by Slack workspace URL"`
 	}
 
-	workspace struct {
-		Token string `json:"token" jsonschema:"the xoxc-* workspace token"`
-		Name  string `json:"name"  jsonschema:"workspace display name"`
+	// maskedWorkspace describes one workspace. Token carries the raw xoxc-*
+	// value only when the server runs with SLACKTOKENS_MCP_ALLOW_RAW enabled;
+	// otherwise only the masked TokenPreview is populated.
+	maskedWorkspace struct {
+		Name         string `json:"name"          jsonschema:"workspace display name"`
+		TokenPreview string `json:"token_preview" jsonschema:"masked token preview (e.g. xoxc-2…3f9a) — for human verification only, NOT a usable credential"`
+		TokenPresent bool   `json:"token_present" jsonschema:"true when a non-empty token was found"`
+		Token        string `json:"token,omitempty" jsonschema:"raw xoxc-* token; populated ONLY when the server is started with SLACKTOKENS_MCP_ALLOW_RAW enabled"`
 	}
 
 	cookieOutput struct {
-		Cookie cookie `json:"cookie" jsonschema:"the d cookie"`
+		Cookie maskedCookie `json:"cookie" jsonschema:"the d cookie, masked"`
 	}
 
 	cookiesOutput struct {
-		Cookies []cookie `json:"cookies" jsonschema:"all relevant Slack auth cookies (d, d-s)"`
+		Cookies []maskedCookie `json:"cookies" jsonschema:"all relevant Slack auth cookies (d, d-s), masked"`
 	}
 
-	cookie struct {
-		Name  string `json:"name"  jsonschema:"cookie name"`
-		Value string `json:"value" jsonschema:"decrypted cookie value"`
+	// maskedCookie describes one auth cookie. Value carries the raw cookie
+	// value only when the server runs with SLACKTOKENS_MCP_ALLOW_RAW enabled.
+	maskedCookie struct {
+		Name         string `json:"name"          jsonschema:"cookie name"`
+		ValuePreview string `json:"value_preview" jsonschema:"masked cookie value — for human verification only, NOT a usable credential"`
+		Present      bool   `json:"present"       jsonschema:"true when a non-empty value was found"`
+		Value        string `json:"value,omitempty" jsonschema:"raw cookie value; populated ONLY when the server is started with SLACKTOKENS_MCP_ALLOW_RAW enabled"`
 	}
 
 	tokensAndCookieOutput struct {
-		Tokens  map[string]workspace `json:"tokens"`
-		Cookie  cookie               `json:"cookie"  jsonschema:"the d cookie (parity with the Python source library)"`
-		Cookies []cookie             `json:"cookies" jsonschema:"all auth cookies (d, d-s) when present"`
+		Tokens  map[string]maskedWorkspace `json:"tokens"`
+		Cookie  maskedCookie               `json:"cookie"  jsonschema:"the d cookie, masked (parity with the Python source library)"`
+		Cookies []maskedCookie             `json:"cookies" jsonschema:"all auth cookies (d, d-s) when present, masked"`
+	}
+
+	// writeCredsOutput is the result of write_credentials_file. It deliberately
+	// carries no credential values — only the path to the file that holds them.
+	writeCredsOutput struct {
+		Path           string `json:"path"            jsonschema:"absolute path to a newly created 0600-mode JSON file containing the live credentials"`
+		Mode           string `json:"mode"            jsonschema:"file permission bits (octal) — readable only by the current OS user"`
+		Bytes          int    `json:"bytes"           jsonschema:"size of the written file in bytes"`
+		WorkspaceCount int    `json:"workspace_count" jsonschema:"number of Slack workspaces written to the file"`
+		CookieCount    int    `json:"cookie_count"    jsonschema:"number of auth cookies written to the file"`
+		Note           string `json:"note"            jsonschema:"handling guidance for the caller"`
 	}
 )
+
+// mcpConfig holds runtime configuration resolved once at startup.
+type mcpConfig struct {
+	// allowRaw, when true, makes the read tools inline raw credential values.
+	// Sourced from SLACKTOKENS_MCP_ALLOW_RAW; default false (masked).
+	allowRaw bool
+}
+
+// credStore lazily creates a private, per-process directory (mode 0700) that
+// holds the credential files written by write_credentials_file. cleanup
+// removes the whole directory; call it on shutdown so credential files never
+// outlive the server.
+type credStore struct {
+	once sync.Once
+	dir  string
+	err  error
+}
+
+func (cs *credStore) dirPath() (string, error) {
+	cs.once.Do(func() {
+		cs.dir, cs.err = os.MkdirTemp("", "slacktokens-mcp-")
+	})
+	return cs.dir, cs.err
+}
+
+func (cs *credStore) cleanup() {
+	if cs.dir != "" {
+		_ = os.RemoveAll(cs.dir)
+	}
+}
+
+// handlers carries the dependencies shared by every tool handler.
+type handlers struct {
+	cfg   mcpConfig
+	store *credStore
+}
 
 // errorResult turns a library error into the spec-compliant tool failure
 // shape: a CallToolResult with IsError:true and a single TextContent block.
@@ -89,69 +161,82 @@ func errorResult(err error) *mcp.CallToolResult {
 // the SDK's outputSchema validation passes even on the error path. Returning
 // IsError:true alongside an "empty but valid" structured payload is the
 // idiomatic shape for the typed-output form of mcp.AddTool.
-func emptyTokens() tokensOutput   { return tokensOutput{Tokens: map[string]workspace{}} }
-func emptyCookies() cookiesOutput { return cookiesOutput{Cookies: []cookie{}} }
+func emptyTokens() tokensOutput   { return tokensOutput{Tokens: map[string]maskedWorkspace{}} }
+func emptyCookies() cookiesOutput { return cookiesOutput{Cookies: []maskedCookie{}} }
 func emptyTokensAndCookie() tokensAndCookieOutput {
 	return tokensAndCookieOutput{
-		Tokens:  map[string]workspace{},
-		Cookies: []cookie{},
+		Tokens:  map[string]maskedWorkspace{},
+		Cookies: []maskedCookie{},
 	}
 }
 
-func toMapWorkspace(in map[string]slacktokens.Workspace) map[string]workspace {
-	out := make(map[string]workspace, len(in))
-	for k, v := range in {
-		out[k] = workspace{Token: v.Token, Name: v.Name}
-	}
-	return out
-}
-
-func toCookieList(in []slacktokens.Cookie) []cookie {
-	out := make([]cookie, len(in))
-	for i, c := range in {
-		out[i] = cookie{Name: c.Name, Value: c.Value}
-	}
-	return out
-}
-
-func handleGetTokens(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, tokensOutput, error) {
+func (h *handlers) getTokens(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, tokensOutput, error) {
 	t, err := slacktokens.GetTokens()
 	if err != nil {
 		return errorResult(err), emptyTokens(), nil
 	}
-	return nil, tokensOutput{Tokens: toMapWorkspace(t)}, nil
+	return nil, tokensOutput{Tokens: toMaskedWorkspaces(t, h.cfg.allowRaw)}, nil
 }
 
-func handleGetCookie(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, cookieOutput, error) {
+func (h *handlers) getCookie(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, cookieOutput, error) {
 	c, err := slacktokens.GetCookie()
 	if err != nil {
 		return errorResult(err), cookieOutput{}, nil
 	}
-	return nil, cookieOutput{Cookie: cookie{Name: c.Name, Value: c.Value}}, nil
+	return nil, cookieOutput{Cookie: toMaskedCookie(c, h.cfg.allowRaw)}, nil
 }
 
-func handleGetCookies(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, cookiesOutput, error) {
+func (h *handlers) getCookies(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, cookiesOutput, error) {
 	cs, err := slacktokens.GetCookies()
 	if err != nil {
 		return errorResult(err), emptyCookies(), nil
 	}
-	return nil, cookiesOutput{Cookies: toCookieList(cs)}, nil
+	return nil, cookiesOutput{Cookies: toMaskedCookies(cs, h.cfg.allowRaw)}, nil
 }
 
-func handleGetTokensAndCookie(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, tokensAndCookieOutput, error) {
+func (h *handlers) getTokensAndCookie(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, tokensAndCookieOutput, error) {
 	r, err := slacktokens.GetTokensAndCookie()
 	if err != nil {
 		return errorResult(err), emptyTokensAndCookie(), nil
 	}
 	return nil, tokensAndCookieOutput{
-		Tokens:  toMapWorkspace(r.Tokens),
-		Cookie:  cookie{Name: r.Cookie.Name, Value: r.Cookie.Value},
-		Cookies: toCookieList(r.Cookies),
+		Tokens:  toMaskedWorkspaces(r.Tokens, h.cfg.allowRaw),
+		Cookie:  toMaskedCookie(r.Cookie, h.cfg.allowRaw),
+		Cookies: toMaskedCookies(r.Cookies, h.cfg.allowRaw),
 	}, nil
 }
 
-// readOnlyAnnotations is shared across every tool — they all read local
-// Slack files, none mutate state, none touch the network, and repeated
+// writeCredentials extracts the live credentials and writes them to a 0600
+// file, returning only the path. The credential values never appear in the
+// tool result, so they do not enter the calling model's context.
+func (h *handlers) writeCredentials(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, writeCredsOutput, error) {
+	r, err := slacktokens.GetTokensAndCookie()
+	if err != nil {
+		return errorResult(err), writeCredsOutput{}, nil
+	}
+	dir, err := h.store.dirPath()
+	if err != nil {
+		return errorResult(fmt.Errorf("create credentials directory: %w", err)), writeCredsOutput{}, nil
+	}
+	path, n, err := writeCredentialsFile(dir, r)
+	if err != nil {
+		return errorResult(fmt.Errorf("write credentials file: %w", err)), writeCredsOutput{}, nil
+	}
+	return nil, writeCredsOutput{
+		Path:           path,
+		Mode:           "0600",
+		Bytes:          n,
+		WorkspaceCount: len(r.Tokens),
+		CookieCount:    len(r.Cookies),
+		Note: "This file holds live Slack credentials. It is readable only by " +
+			"your OS user (mode 0600) and is deleted when this MCP server stops. " +
+			"Hand the path to the user or to a script — do not open or print the " +
+			"file contents here.",
+	}, nil
+}
+
+// readOnlyAnnotations is shared across the four read tools — they all read
+// local Slack files, none mutate state, none touch the network, and repeated
 // calls within a Slack session return the same values.
 func readOnlyAnnotations(title string) *mcp.ToolAnnotations {
 	falsePtr := false
@@ -164,7 +249,34 @@ func readOnlyAnnotations(title string) *mcp.ToolAnnotations {
 	}
 }
 
+// writeFileAnnotations is for write_credentials_file: it creates a new file,
+// so it is not read-only and not idempotent (each call writes a fresh file).
+// It still destroys nothing and touches no network.
+func writeFileAnnotations(title string) *mcp.ToolAnnotations {
+	falsePtr := false
+	return &mcp.ToolAnnotations{
+		Title:           title,
+		ReadOnlyHint:    false,
+		DestructiveHint: &falsePtr,
+		IdempotentHint:  false,
+		OpenWorldHint:   &falsePtr,
+	}
+}
+
+// newServer builds the MCP server with configuration resolved from the
+// environment. Use newServerWithConfig in tests to drive a specific config.
 func newServer() *mcp.Server {
+	srv, _ := newServerWithConfig(mcpConfig{allowRaw: allowRawFromEnv()})
+	return srv
+}
+
+// newServerWithConfig builds the MCP server and the credential store that
+// backs write_credentials_file. The caller owns the returned store and must
+// call store.cleanup() on shutdown.
+func newServerWithConfig(cfg mcpConfig) (*mcp.Server, *credStore) {
+	store := &credStore{}
+	h := &handlers{cfg: cfg, store: store}
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:       "slacktokens",
 		Title:      "Slack Tokens",
@@ -178,40 +290,56 @@ func newServer() *mcp.Server {
 		Capabilities: &mcp.ServerCapabilities{},
 	})
 
-	const sensitivityNote = " SENSITIVE: returns Slack credentials that grant " +
-		"full workspace access. Only invoke when the user has explicitly " +
-		"asked for Slack auth material. Read-only and offline — does not " +
-		"modify any state or make network calls."
+	const maskedNote = " By default this returns only a MASKED preview — never " +
+		"a usable credential — so Slack secrets do not enter the AI's context " +
+		"or transcript. To obtain real, usable credentials, call " +
+		"write_credentials_file. Raw values are inlined here only when the " +
+		"server is started with the SLACKTOKENS_MCP_ALLOW_RAW environment " +
+		"variable set. Read-only and offline."
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_tokens",
-		Title:       "Get Slack workspace tokens (sensitive)",
-		Description: "Returns the xoxc-* personal token and display name for every Slack workspace this user is logged into in the local Slack desktop app." + sensitivityNote,
-		Annotations: readOnlyAnnotations("Get Slack workspace tokens (sensitive)"),
-	}, handleGetTokens)
+		Title:       "List Slack workspace tokens (masked)",
+		Description: "Lists every Slack workspace this user is signed into in the local desktop app, each with its display name and a masked token preview." + maskedNote,
+		Annotations: readOnlyAnnotations("List Slack workspace tokens (masked)"),
+	}, h.getTokens)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_cookie",
-		Title:       "Get Slack 'd' auth cookie (sensitive)",
-		Description: "Returns the 'd' authentication cookie used by Slack alongside workspace tokens. Parity with the Python source library." + sensitivityNote,
-		Annotations: readOnlyAnnotations("Get Slack 'd' auth cookie (sensitive)"),
-	}, handleGetCookie)
+		Title:       "Get Slack 'd' auth cookie (masked)",
+		Description: "Reports the Slack 'd' authentication cookie used alongside workspace tokens, as a masked preview. Parity with the Python source library." + maskedNote,
+		Annotations: readOnlyAnnotations("Get Slack 'd' auth cookie (masked)"),
+	}, h.getCookie)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_cookies",
-		Title:       "Get all Slack auth cookies (sensitive)",
-		Description: "Returns every Slack authentication cookie (`d` always, `d-s` when present). Some Slack endpoints require `d-s` in addition to `d`." + sensitivityNote,
-		Annotations: readOnlyAnnotations("Get all Slack auth cookies (sensitive)"),
-	}, handleGetCookies)
+		Title:       "Get all Slack auth cookies (masked)",
+		Description: "Reports every Slack authentication cookie (`d` always, `d-s` when present) as masked previews. Some Slack endpoints require `d-s` in addition to `d`." + maskedNote,
+		Annotations: readOnlyAnnotations("Get all Slack auth cookies (masked)"),
+	}, h.getCookies)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_tokens_and_cookie",
-		Title:       "Get Slack tokens + cookies in one call (sensitive)",
-		Description: "Returns workspace tokens AND the auth cookies in a single call. Convenience wrapper combining `get_tokens` and `get_cookies`." + sensitivityNote,
-		Annotations: readOnlyAnnotations("Get Slack tokens + cookies in one call (sensitive)"),
-	}, handleGetTokensAndCookie)
+		Title:       "Get Slack tokens + cookies in one call (masked)",
+		Description: "Reports workspace tokens AND the auth cookies in a single call, all masked. Convenience wrapper combining `get_tokens` and `get_cookies`." + maskedNote,
+		Annotations: readOnlyAnnotations("Get Slack tokens + cookies in one call (masked)"),
+	}, h.getTokensAndCookie)
 
-	return server
+	mcp.AddTool(server, &mcp.Tool{
+		Name:  "write_credentials_file",
+		Title: "Write Slack credentials to a local file (sensitive)",
+		Description: "Extracts the live Slack workspace tokens and authentication " +
+			"cookies and writes them as JSON to a newly created local file " +
+			"readable only by the current OS user (mode 0600). Returns ONLY the " +
+			"file path plus metadata — the credential values never enter the " +
+			"AI's context. Hand the returned path to the user or to a script; do " +
+			"not open or print the file contents yourself. Triggers an OS " +
+			"keychain / credential prompt. The file is deleted when this MCP " +
+			"server stops.",
+		Annotations: writeFileAnnotations("Write Slack credentials to a local file (sensitive)"),
+	}, h.writeCredentials)
+
+	return server, store
 }
 
 func main() {
@@ -223,8 +351,26 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("slacktokens-mcp: ")
 
-	if err := newServer().Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "slacktokens-mcp:", err)
 		os.Exit(1)
 	}
+}
+
+// run serves the MCP server until the transport closes or the process is
+// signalled. Its deferred cleanups (signal handler, credential-store removal)
+// always run — main keeps os.Exit out of their way.
+func run() error {
+	// Cancel on SIGINT/SIGTERM so the deferred credential-store cleanup runs
+	// and credential files never outlive the process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	server, store := newServerWithConfig(mcpConfig{allowRaw: allowRawFromEnv()})
+	defer store.cleanup()
+
+	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
 }
