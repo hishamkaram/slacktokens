@@ -257,7 +257,7 @@ Hooks:
 - **pre-commit** runs `gofmt -l`, `go vet`, and `golangci-lint`.
 - **pre-push** runs `go test -race` and `govulncheck`.
 
-CI mirrors these checks plus a `gosec` job, plus a `lint` matrix across Linux/macOS/Windows targets, plus a `test` matrix of 3 Go versions × 3 OSes.
+CI mirrors these checks plus a `gosec` job, plus a `lint` matrix across Linux/macOS/Windows targets, plus a `test` matrix of 2 Go versions × 3 OSes.
 
 ## License
 

@@ -15,7 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        go: ["1.22", "1.23", "1.24"]
+        # go.mod requires go 1.25.0; test the supported releases. setup-go@v6
+        # pins GOTOOLCHAIN=local, so each entry runs on that exact version
+        # rather than silently auto-upgrading to satisfy the go directive.
+        go: ["1.25", "1.26"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
