@@ -73,7 +73,7 @@ func TestListTools_AllToolsPresentWithProperAnnotations(t *testing.T) {
 	}
 	want := []string{
 		"get_cookie", "get_cookies", "get_tokens", "get_tokens_and_cookie",
-		"write_credentials_file",
+		"slack_api_call", "write_credentials_file",
 	}
 	got := make([]string, 0, len(list.Tools))
 	for _, tt := range list.Tools {
@@ -97,29 +97,47 @@ func TestListTools_AllToolsPresentWithProperAnnotations(t *testing.T) {
 		if tt.Description == "" {
 			t.Errorf("%s: empty description", tt.Name)
 		}
-		// Every tool is non-destructive and closed-world.
+		// Every tool is non-destructive (the proxy's curated write set is
+		// additive only).
 		if tt.Annotations.DestructiveHint == nil || *tt.Annotations.DestructiveHint {
 			t.Errorf("%s: DestructiveHint must be explicitly false", tt.Name)
 		}
-		if tt.Annotations.OpenWorldHint == nil || *tt.Annotations.OpenWorldHint {
-			t.Errorf("%s: OpenWorldHint must be explicitly false", tt.Name)
-		}
-		// write_credentials_file creates a file: not read-only, not idempotent.
-		// The four read tools must be both.
-		if tt.Name == "write_credentials_file" {
+
+		switch tt.Name {
+		case "slack_api_call":
+			// The credential-broker proxy reaches the network and can write
+			// when the gate is open: online, not read-only, not idempotent.
+			if tt.Annotations.OpenWorldHint == nil || !*tt.Annotations.OpenWorldHint {
+				t.Errorf("%s: OpenWorldHint must be explicitly true", tt.Name)
+			}
+			if tt.Annotations.ReadOnlyHint {
+				t.Errorf("%s: ReadOnlyHint must be false — it can call write methods", tt.Name)
+			}
+			if tt.Annotations.IdempotentHint {
+				t.Errorf("%s: IdempotentHint must be false — each call is a fresh request", tt.Name)
+			}
+		case "write_credentials_file":
+			// Creates a file: offline, not read-only, not idempotent.
+			if tt.Annotations.OpenWorldHint == nil || *tt.Annotations.OpenWorldHint {
+				t.Errorf("%s: OpenWorldHint must be explicitly false", tt.Name)
+			}
 			if tt.Annotations.ReadOnlyHint {
 				t.Errorf("%s: ReadOnlyHint must be false — it writes a file", tt.Name)
 			}
 			if tt.Annotations.IdempotentHint {
 				t.Errorf("%s: IdempotentHint must be false — each call writes a fresh file", tt.Name)
 			}
-			continue
-		}
-		if !tt.Annotations.ReadOnlyHint {
-			t.Errorf("%s: ReadOnlyHint must be true", tt.Name)
-		}
-		if !tt.Annotations.IdempotentHint {
-			t.Errorf("%s: IdempotentHint must be true", tt.Name)
+		default:
+			// The read tools: offline, read-only, idempotent.
+			if tt.Annotations.OpenWorldHint == nil || *tt.Annotations.OpenWorldHint {
+				t.Errorf("%s: OpenWorldHint must be explicitly false", tt.Name)
+			}
+			if !tt.Annotations.ReadOnlyHint {
+				t.Errorf("%s: ReadOnlyHint must be true", tt.Name)
+			}
+			if !tt.Annotations.IdempotentHint {
+				t.Errorf("%s: IdempotentHint must be true", tt.Name)
+			}
 		}
 	}
 }
