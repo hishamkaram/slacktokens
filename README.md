@@ -187,32 +187,72 @@ The tool advertises `destructiveHint: true`, so a well-behaved MCP host asks you
 
 If you understand the exposure and still want the read tools to inline raw `xoxc-*` tokens and cookie values (the previous behaviour), start the server with the `SLACKTOKENS_MCP_ALLOW_RAW=1` environment variable. Leaving it unset keeps every read tool masked.
 
-### Claude Code / Claude Desktop config
+### Add to Claude Code
 
-```jsonc
-{
-  "mcpServers": {
-    "slacktokens": {
-      "command": "slacktokens-mcp"
-    }
-  }
-}
+Requires the `slacktokens-mcp` binary on your `PATH` (via Homebrew or `go install` — see [Install](#install)). If it isn't on `PATH`, substitute its absolute path (e.g. `$(brew --prefix)/bin/slacktokens-mcp`, or `$(go env GOPATH)/bin/slacktokens-mcp`) for `slacktokens-mcp` below.
+
+Register the server with the [`claude mcp add`](https://docs.claude.com/en/docs/claude-code/mcp) command. Pick the capability level you want — each is strictly additive and off by default:
+
+```bash
+# Read-only (masked credentials; the safe default)
+claude mcp add slacktokens -s user -- slacktokens-mcp
+
+# Read + additive writes (chat.postMessage, reactions.add, conversations.mark)
+claude mcp add slacktokens -s user \
+  -e SLACKTOKENS_MCP_ALLOW_WRITE=1 \
+  -- slacktokens-mcp
+
+# Read + writes + message deletion (chat.delete via slack_delete_message)
+claude mcp add slacktokens -s user \
+  -e SLACKTOKENS_MCP_ALLOW_WRITE=1 \
+  -e SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 \
+  -- slacktokens-mcp
 ```
 
-To opt in to raw output, add the environment variable:
+- `-s user` registers the server for **all** your projects. Use `-s project` (shared via `.mcp.json`) or `-s local` (default, current project only) to narrow the scope.
+- Verify with `claude mcp get slacktokens`; it should list the environment variables you set.
+
+**Updating the flags.** Claude Code has no in-place env edit — re-register:
+
+```bash
+claude mcp remove slacktokens -s user
+claude mcp add slacktokens -s user \
+  -e SLACKTOKENS_MCP_ALLOW_WRITE=1 \
+  -e SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 \
+  -- slacktokens-mcp
+```
+
+The server reads its configuration once at startup, so restart Claude Code (or reconnect the server from the `/mcp` menu) after changing a flag.
+
+### Add to Claude Desktop
+
+Edit the config file — macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`; Windows: `%APPDATA%\Claude\claude_desktop_config.json` — then restart the app:
 
 ```jsonc
 {
   "mcpServers": {
     "slacktokens": {
       "command": "slacktokens-mcp",
-      "env": { "SLACKTOKENS_MCP_ALLOW_RAW": "1" }
+      "env": {
+        "SLACKTOKENS_MCP_ALLOW_WRITE": "1",
+        "SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE": "1"
+      }
     }
   }
 }
 ```
 
-(Or use the absolute path to the binary if it isn't on PATH.)
+Omit the `env` block for read-only, or include only `SLACKTOKENS_MCP_ALLOW_WRITE` for writes without deletion. Use the binary's absolute path for `command` if it isn't on `PATH`.
+
+### Environment variables
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SLACKTOKENS_MCP_ALLOW_WRITE` | unset | Enables the additive write methods on `slack_api_call` (`chat.postMessage`, `reactions.add`, `conversations.mark`). |
+| `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE` | unset | **Together with** `SLACKTOKENS_MCP_ALLOW_WRITE`, registers the destructive `slack_delete_message` tool (`chat.delete`). Both keys are required. |
+| `SLACKTOKENS_MCP_ALLOW_RAW` | unset | Inlines raw `xoxc-*` tokens and cookie values into the read-tool results instead of masked previews. |
+
+The two capability gates (`SLACKTOKENS_MCP_ALLOW_WRITE`, `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE`) are enabled only when their value is **exactly `1`** — any other value, including padded strings such as `" 1 "`, leaves them disabled (fail-closed). `SLACKTOKENS_MCP_ALLOW_RAW` is more lenient and also accepts `true`/`yes`/`on`.
 
 ## How it works
 
