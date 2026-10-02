@@ -32,6 +32,13 @@
 //   - Setting the env var SLACKTOKENS_MCP_ALLOW_RAW=1 is a deliberate,
 //     documented opt-out that inlines raw values into the read tools again.
 //
+// One tool is NOT offline: slack_api_call is a credential-broker proxy. It
+// injects the live credentials server-side, calls slack.com, and returns the
+// response — so the credential never enters the model context, but the Slack
+// response does (it is OpenWorldHint=true, the lone exception to the offline
+// posture above). It is fail-closed: only allowlisted methods run, and write
+// methods require SLACKTOKENS_MCP_ALLOW_WRITE=1. See proxy.go.
+//
 // Do not expose this server over HTTP, network, or any non-stdio transport.
 package main
 
@@ -40,6 +47,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -113,6 +121,9 @@ type mcpConfig struct {
 	// allowRaw, when true, makes the read tools inline raw credential values.
 	// Sourced from SLACKTOKENS_MCP_ALLOW_RAW; default false (masked).
 	allowRaw bool
+	// allowWrite, when true, lets the slack_api_call proxy invoke the curated
+	// WRITE method set. Sourced from SLACKTOKENS_MCP_ALLOW_WRITE; default false.
+	allowWrite bool
 }
 
 // credStore lazily creates a private, per-process directory (mode 0700) that
@@ -142,6 +153,13 @@ func (cs *credStore) cleanup() {
 type handlers struct {
 	cfg   mcpConfig
 	store *credStore
+
+	// Proxy dependencies for slack_api_call. All are nil in production, where
+	// the methods on *handlers fall back to live defaults (local credentials,
+	// a real HTTP client, the Slack host). Tests inject stubs here.
+	credsFn    func() (slacktokens.Result, error)
+	httpClient *http.Client
+	baseURLStr string
 }
 
 // errorResult turns a library error into the spec-compliant tool failure
@@ -263,10 +281,30 @@ func writeFileAnnotations(title string) *mcp.ToolAnnotations {
 	}
 }
 
+// proxyAnnotations is for slack_api_call. Unlike every other tool it reaches
+// the network (OpenWorldHint=true) and can mutate remote state when the write
+// gate is open (ReadOnlyHint=false). The curated write set is additive only, so
+// it is still non-destructive. Each call is a fresh network request, so it is
+// not idempotent.
+func proxyAnnotations(title string) *mcp.ToolAnnotations {
+	falsePtr := false
+	truePtr := true
+	return &mcp.ToolAnnotations{
+		Title:           title,
+		ReadOnlyHint:    false,
+		DestructiveHint: &falsePtr,
+		IdempotentHint:  false,
+		OpenWorldHint:   &truePtr,
+	}
+}
+
 // newServer builds the MCP server with configuration resolved from the
 // environment. Use newServerWithConfig in tests to drive a specific config.
 func newServer() *mcp.Server {
-	srv, _ := newServerWithConfig(mcpConfig{allowRaw: allowRawFromEnv()})
+	srv, _ := newServerWithConfig(mcpConfig{
+		allowRaw:   allowRawFromEnv(),
+		allowWrite: allowWriteFromEnv(),
+	})
 	return srv
 }
 
@@ -339,6 +377,21 @@ func newServerWithConfig(cfg mcpConfig) (*mcp.Server, *credStore) {
 		Annotations: writeFileAnnotations("Write Slack credentials to a local file (sensitive)"),
 	}, h.writeCredentials)
 
+	mcp.AddTool(server, &mcp.Tool{
+		Name:  "slack_api_call",
+		Title: "Call the Slack Web API via credential proxy",
+		Description: "Calls a Slack Web API method on your behalf, injecting your " +
+			"Slack credentials server-side so they NEVER enter the AI's context. " +
+			"Give a `workspace` (Slack URL), a `method` (e.g. conversations.history " +
+			"or chat.postMessage), and its `params`. Only allowlisted methods are " +
+			"permitted; write methods require the server to be started with " +
+			"SLACKTOKENS_MCP_ALLOW_WRITE=1. IMPORTANT: this tool is ONLINE (it " +
+			"contacts slack.com) and the Slack response is returned to the AI — the " +
+			"credential is protected, but the response data is not, and some " +
+			"responses contain private workspace information.",
+		Annotations: proxyAnnotations("Call the Slack Web API via credential proxy"),
+	}, h.slackAPICall)
+
 	return server, store
 }
 
@@ -366,7 +419,10 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server, store := newServerWithConfig(mcpConfig{allowRaw: allowRawFromEnv()})
+	server, store := newServerWithConfig(mcpConfig{
+		allowRaw:   allowRawFromEnv(),
+		allowWrite: allowWriteFromEnv(),
+	})
 	defer store.cleanup()
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {

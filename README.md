@@ -153,12 +153,24 @@ Tools:
 | `get_cookies` | `d` and `d-s` (when present), **masked** |
 | `get_tokens_and_cookie` | masked tokens + cookies in one call |
 | `write_credentials_file` | path to a `0600` JSON file holding the real credentials |
+| `slack_api_call` | result of a Slack Web API call made with injected credentials (credential-broker proxy) |
 
-The four read tools advertise `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. `write_credentials_file` advertises `readOnlyHint: false` and `idempotentHint: false` (it creates a file) and is otherwise non-destructive and offline. The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
+The four read tools advertise `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. `write_credentials_file` advertises `readOnlyHint: false` and `idempotentHint: false` (it creates a file) and is otherwise non-destructive and offline. `slack_api_call` advertises `openWorldHint: true` (it is the one tool that reaches the network) and `readOnlyHint: false` (it can call write methods when enabled). The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
 
 Built against the official Go SDK (`github.com/modelcontextprotocol/go-sdk@v1.6.0`) and the **MCP 2025-11-25** specification.
 
 > Note: file handoff keeps secrets out of the model context, transcript, and logs. An agent that *also* has shell/file-read tools can still be explicitly instructed to open the file — that is a deliberate user-directed act, not the silent exposure this design prevents.
+
+### Using credentials without exposing them: the Slack API proxy
+
+`slack_api_call` lets an AI *use* your Slack session without ever seeing the credential. The AI names a `workspace` (Slack URL), a `method` (e.g. `conversations.history` or `chat.postMessage`), and its `params`; the server injects the `xoxc` token + `d` cookie **server-side**, calls `slack.com`, and returns the JSON response. The credential never enters the model context, transcript, or logs.
+
+It is **fail-closed**:
+
+- Only methods on a curated allowlist run. Reads (`auth.test`, `conversations.history`, `users.info`, `search.messages`, …) are always available.
+- Write methods (`chat.postMessage`, `reactions.add`, `conversations.mark`) run **only** when the server is started with `SLACKTOKENS_MCP_ALLOW_WRITE=1` (exactly `1`). These are additive only — nothing that overwrites or deletes. Destructive/admin methods (`chat.update`, `chat.delete`, `conversations.archive`, `admin.*`, …) are never exposed.
+
+> Scope of protection: this tool protects the **credential**, not the **response**. The Slack JSON it returns enters the model context like any other tool output and can contain private workspace data. Treat a model with this tool as able to act in Slack with your session's authority (bounded by the allowlist and the write gate).
 
 ### Opting in to raw output
 
