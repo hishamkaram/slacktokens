@@ -126,4 +126,28 @@ func TestLiveProxy(t *testing.T) {
 			}
 		}
 	}
+
+	// Optional live DELETE proof (irreversible): set both gates plus
+	// SLACKTOKENS_TEST_CHANNEL=C... and SLACKTOKENS_TEST_DELETE_TS=<ts>.
+	if allowWriteFromEnv() && allowDestructiveFromEnv() {
+		ch := os.Getenv("SLACKTOKENS_TEST_CHANNEL")
+		ts := os.Getenv("SLACKTOKENS_TEST_DELETE_TS")
+		if ch == "" || ts == "" {
+			t.Log("destructive gate on but SLACKTOKENS_TEST_CHANNEL / SLACKTOKENS_TEST_DELETE_TS empty — skipping live delete")
+		} else {
+			res, dout, derr := h.slackDeleteMessage(context.Background(), nil, slackDeleteInput{
+				Workspace: ws, Channel: ch, TS: ts,
+			})
+			if derr != nil {
+				t.Fatalf("slack_delete_message transport err: %v", derr)
+			}
+			if res != nil && res.IsError {
+				t.Fatalf("slack_delete_message IsError: %+v", res.Content)
+			}
+			t.Logf("chat.delete -> status=%d ok=%v", dout.Status, dout.OK)
+			if !dout.OK {
+				t.Fatalf("chat.delete ok=false: %s", dout.Body)
+			}
+		}
+	}
 }

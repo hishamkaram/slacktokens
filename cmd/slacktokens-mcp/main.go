@@ -39,6 +39,12 @@
 // posture above). It is fail-closed: only allowlisted methods run, and write
 // methods require SLACKTOKENS_MCP_ALLOW_WRITE=1. See proxy.go.
 //
+// Message deletion is isolated in a separate DESTRUCTIVE tool,
+// slack_delete_message (chat.delete), registered only under a two-key gate —
+// BOTH SLACKTOKENS_MCP_ALLOW_WRITE=1 AND SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 —
+// and annotated DestructiveHint=true so the host confirms each deletion. The
+// generic slack_api_call never allowlists chat.delete, so it cannot delete.
+//
 // Do not expose this server over HTTP, network, or any non-stdio transport.
 package main
 
@@ -124,6 +130,10 @@ type mcpConfig struct {
 	// allowWrite, when true, lets the slack_api_call proxy invoke the curated
 	// WRITE method set. Sourced from SLACKTOKENS_MCP_ALLOW_WRITE; default false.
 	allowWrite bool
+	// allowDestructive, when true AND allowWrite is also true, registers the
+	// destructive slack_delete_message tool. Sourced from
+	// SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE; default false (two-key gate).
+	allowDestructive bool
 }
 
 // credStore lazily creates a private, per-process directory (mode 0700) that
@@ -298,12 +308,28 @@ func proxyAnnotations(title string) *mcp.ToolAnnotations {
 	}
 }
 
+// destructiveAnnotations is for slack_delete_message: online, not read-only, not
+// idempotent, and DESTRUCTIVE (DestructiveHint=true) so an MCP host prompts the
+// human before each deletion. Static — the tool is registered only when the
+// destructive gate is on, so its destructiveness is never in doubt.
+func destructiveAnnotations(title string) *mcp.ToolAnnotations {
+	truePtr := true
+	return &mcp.ToolAnnotations{
+		Title:           title,
+		ReadOnlyHint:    false,
+		DestructiveHint: &truePtr,
+		IdempotentHint:  false,
+		OpenWorldHint:   &truePtr,
+	}
+}
+
 // newServer builds the MCP server with configuration resolved from the
 // environment. Use newServerWithConfig in tests to drive a specific config.
 func newServer() *mcp.Server {
 	srv, _ := newServerWithConfig(mcpConfig{
-		allowRaw:   allowRawFromEnv(),
-		allowWrite: allowWriteFromEnv(),
+		allowRaw:         allowRawFromEnv(),
+		allowWrite:       allowWriteFromEnv(),
+		allowDestructive: allowDestructiveFromEnv(),
 	})
 	return srv
 }
@@ -392,6 +418,27 @@ func newServerWithConfig(cfg mcpConfig) (*mcp.Server, *credStore) {
 		Annotations: proxyAnnotations("Call the Slack Web API via credential proxy"),
 	}, h.slackAPICall)
 
+	// slack_delete_message is a DESTRUCTIVE tool. It is registered only under a
+	// two-key gate — BOTH SLACKTOKENS_MCP_ALLOW_WRITE=1 AND
+	// SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 — so deletion is unavailable by default
+	// and the generic slack_api_call (which never allowlists chat.delete) cannot
+	// be used to delete. Config is resolved once at startup; changing a gate
+	// requires restarting the server.
+	if cfg.allowWrite && cfg.allowDestructive {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:  "slack_delete_message",
+			Title: "Delete a Slack message (destructive)",
+			Description: "Permanently deletes a single Slack message via chat.delete, " +
+				"injecting your credentials server-side so they NEVER enter the AI's " +
+				"context. Give a `workspace` (Slack URL), the `channel` ID, and the " +
+				"message `ts`. This is IRREVERSIBLE, and with an admin account can " +
+				"delete other users' messages. It is available only because the server " +
+				"was started with both SLACKTOKENS_MCP_ALLOW_WRITE=1 and " +
+				"SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1.",
+			Annotations: destructiveAnnotations("Delete a Slack message (destructive)"),
+		}, h.slackDeleteMessage)
+	}
+
 	return server, store
 }
 
@@ -420,8 +467,9 @@ func run() error {
 	defer stop()
 
 	server, store := newServerWithConfig(mcpConfig{
-		allowRaw:   allowRawFromEnv(),
-		allowWrite: allowWriteFromEnv(),
+		allowRaw:         allowRawFromEnv(),
+		allowWrite:       allowWriteFromEnv(),
+		allowDestructive: allowDestructiveFromEnv(),
 	})
 	defer store.cleanup()
 
