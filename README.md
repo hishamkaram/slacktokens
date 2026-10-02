@@ -154,6 +154,7 @@ Tools:
 | `get_tokens_and_cookie` | masked tokens + cookies in one call |
 | `write_credentials_file` | path to a `0600` JSON file holding the real credentials |
 | `slack_api_call` | result of a Slack Web API call made with injected credentials (credential-broker proxy) |
+| `slack_delete_message` | deletes one message via `chat.delete` (only when the destructive gate is on) |
 
 The four read tools advertise `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. `write_credentials_file` advertises `readOnlyHint: false` and `idempotentHint: false` (it creates a file) and is otherwise non-destructive and offline. `slack_api_call` advertises `openWorldHint: true` (it is the one tool that reaches the network) and `readOnlyHint: false` (it can call write methods when enabled). The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
 
@@ -171,6 +172,16 @@ It is **fail-closed**:
 - Write methods (`chat.postMessage`, `reactions.add`, `conversations.mark`) run **only** when the server is started with `SLACKTOKENS_MCP_ALLOW_WRITE=1` (exactly `1`). These are additive only — nothing that overwrites or deletes. Destructive/admin methods (`chat.update`, `chat.delete`, `conversations.archive`, `admin.*`, …) are never exposed.
 
 > Scope of protection: this tool protects the **credential**, not the **response**. The Slack JSON it returns enters the model context like any other tool output and can contain private workspace data. Treat a model with this tool as able to act in Slack with your session's authority (bounded by the allowlist and the write gate).
+
+### Deleting messages (destructive)
+
+`chat.delete` is **never** reachable through `slack_api_call` — deletion is irreversible and, with an admin account, can remove *other users'* messages. It is isolated in a dedicated tool, `slack_delete_message` (`workspace`, `channel`, `ts`), behind a **two-key gate**: it is registered only when the server is started with **both** `SLACKTOKENS_MCP_ALLOW_WRITE=1` **and** `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1`.
+
+```bash
+SLACKTOKENS_MCP_ALLOW_WRITE=1 SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 slacktokens-mcp
+```
+
+The tool advertises `destructiveHint: true`, so a well-behaved MCP host asks you to confirm each deletion and shows the exact `channel` + `ts`. Config is read once at startup — change a gate, restart the server. Other destructive/admin methods (`chat.update`, `conversations.archive`, `admin.*`) remain unavailable.
 
 ### Opting in to raw output
 

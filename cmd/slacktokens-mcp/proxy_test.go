@@ -36,15 +36,15 @@ func testResult() slacktokens.Result {
 }
 
 func TestAllowWriteFromEnv(t *testing.T) {
-	// The write gate is strict: only "1" (optionally padded) enables it. The
-	// looser truthy words that allowRawFromEnv accepts must NOT enable writes.
+	// The write gate is strict: the value must be EXACTLY "1". Looser truthy
+	// words AND padded values must NOT enable writes (fail closed).
 	cases := []struct {
 		val  string
 		want bool
 	}{
 		{"", false}, {"0", false}, {"false", false}, {"no", false},
 		{"true", false}, {"TRUE", false}, {"Yes", false}, {"on", false},
-		{"1", true}, {" 1 ", true},
+		{" 1 ", false}, {"1\n", false}, {"1", true},
 	}
 	for _, c := range cases {
 		t.Run("val="+c.val, func(t *testing.T) {
@@ -159,22 +159,37 @@ func TestResolveWorkspace(t *testing.T) {
 
 func TestCookieHeader(t *testing.T) {
 	t.Run("d only", func(t *testing.T) {
-		got := cookieHeader([]slacktokens.Cookie{{Name: "d", Value: "xoxd-abc"}})
-		if got != "d=xoxd-abc" {
-			t.Errorf("got %q", got)
+		got, err := cookieHeader([]slacktokens.Cookie{{Name: "d", Value: "xoxd-abc"}})
+		if err != nil || got != "d=xoxd-abc" {
+			t.Errorf("got (%q, %v)", got, err)
 		}
 	})
 	t.Run("d and d-s", func(t *testing.T) {
-		got := cookieHeader([]slacktokens.Cookie{
+		got, err := cookieHeader([]slacktokens.Cookie{
 			{Name: "d", Value: "xoxd-abc"}, {Name: "d-s", Value: "123"},
 		})
-		if got != "d=xoxd-abc; d-s=123" {
-			t.Errorf("got %q", got)
+		if err != nil || got != "d=xoxd-abc; d-s=123" {
+			t.Errorf("got (%q, %v)", got, err)
 		}
 	})
-	t.Run("no d is empty", func(t *testing.T) {
-		if got := cookieHeader([]slacktokens.Cookie{{Name: "d-s", Value: "123"}}); got != "" {
-			t.Errorf("got %q, want empty", got)
+	t.Run("duplicate identical d is fine", func(t *testing.T) {
+		got, err := cookieHeader([]slacktokens.Cookie{
+			{Name: "d", Value: "xoxd-abc"}, {Name: "d", Value: "xoxd-abc"},
+		})
+		if err != nil || got != "d=xoxd-abc" {
+			t.Errorf("got (%q, %v)", got, err)
+		}
+	})
+	t.Run("distinct duplicate d is ambiguous error", func(t *testing.T) {
+		if _, err := cookieHeader([]slacktokens.Cookie{
+			{Name: "d", Value: "xoxd-abc"}, {Name: "d", Value: "xoxd-DIFFERENT"},
+		}); err == nil {
+			t.Error("expected ambiguity error for two distinct d cookies")
+		}
+	})
+	t.Run("no d is error", func(t *testing.T) {
+		if _, err := cookieHeader([]slacktokens.Cookie{{Name: "d-s", Value: "123"}}); err == nil {
+			t.Error("expected error when no d cookie present")
 		}
 	})
 }
@@ -583,6 +598,204 @@ func TestSlackAPICall_WorkspaceOmittedSingleWorkspace(t *testing.T) {
 	}
 	if gotAuth != "Bearer "+testXOXC {
 		t.Errorf("Authorization = %q", gotAuth)
+	}
+}
+
+func TestAllowDestructiveFromEnv(t *testing.T) {
+	// Strict like the write gate: the value must be EXACTLY "1" (fail closed on
+	// padded or truthy-word values).
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", false}, {"0", false}, {"false", false}, {"no", false},
+		{"true", false}, {"on", false}, {" 1 ", false}, {"1\n", false}, {"1", true},
+	}
+	for _, c := range cases {
+		t.Run("val="+c.val, func(t *testing.T) {
+			t.Setenv(allowDestructiveEnv, c.val)
+			if got := allowDestructiveFromEnv(); got != c.want {
+				t.Errorf("allowDestructiveFromEnv() with %q = %v, want %v", c.val, got, c.want)
+			}
+		})
+	}
+}
+
+// connectCfg connects a client to a server built from an explicit config.
+func connectCfg(t *testing.T, cfg mcpConfig) *mcp.ClientSession {
+	t.Helper()
+	srv, store := newServerWithConfig(cfg)
+	t.Cleanup(store.cleanup)
+	srvT, cliT := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.Connect(ctx, srvT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v0"}, nil)
+	cs, err := client.Connect(ctx, cliT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
+}
+
+func findTool(t *testing.T, cs *mcp.ClientSession, name string) *mcp.Tool {
+	t.Helper()
+	list, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	for _, tt := range list.Tools {
+		if tt.Name == name {
+			return tt
+		}
+	}
+	return nil
+}
+
+func TestDeleteTool_RegisteredOnlyUnderTwoKeyGate(t *testing.T) {
+	cases := []struct {
+		name       string
+		cfg        mcpConfig
+		wantDelete bool
+	}{
+		{"no gates", mcpConfig{}, false},
+		{"write only", mcpConfig{allowWrite: true}, false},
+		{"destructive only", mcpConfig{allowDestructive: true}, false},
+		{"both gates", mcpConfig{allowWrite: true, allowDestructive: true}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cs := connectCfg(t, c.cfg)
+			// slack_api_call is always present regardless of gates.
+			if findTool(t, cs, "slack_api_call") == nil {
+				t.Error("slack_api_call must always be registered")
+			}
+			tool := findTool(t, cs, "slack_delete_message")
+			if c.wantDelete {
+				if tool == nil {
+					t.Fatal("slack_delete_message must be registered when both gates are set")
+				}
+				if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
+					t.Error("slack_delete_message must advertise DestructiveHint=true")
+				}
+				if tool.Annotations.ReadOnlyHint {
+					t.Error("slack_delete_message must not be ReadOnlyHint")
+				}
+				if tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+					t.Error("slack_delete_message must advertise OpenWorldHint=true")
+				}
+			} else if tool != nil {
+				t.Errorf("slack_delete_message must NOT be registered for cfg %+v", c.cfg)
+			}
+		})
+	}
+}
+
+func TestSlackDeleteMessage_Success(t *testing.T) {
+	var gotPath, gotBody, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = io.WriteString(w, `{"ok":true,"channel":"C1","ts":"1401383885.000061"}`)
+	}))
+	defer srv.Close()
+
+	h := newProxyHandler(t, true, srv)
+	res, out, err := h.slackDeleteMessage(context.Background(), nil, slackDeleteInput{
+		Workspace: "https://acme.slack.com",
+		Channel:   "C1",
+		TS:        "1401383885.000061",
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if res != nil && res.IsError {
+		t.Fatalf("unexpected IsError: %+v", res.Content)
+	}
+	if gotPath != "/api/chat.delete" {
+		t.Errorf("path = %q, want /api/chat.delete", gotPath)
+	}
+	if gotAuth != "Bearer "+testXOXC {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if !strings.Contains(gotBody, "channel=C1") || !strings.Contains(gotBody, "ts=1401383885.000061") {
+		t.Errorf("body = %q", gotBody)
+	}
+	if !out.OK || out.Method != "chat.delete" {
+		t.Errorf("out = %+v", out)
+	}
+	blob, _ := json.Marshal(out)
+	if strings.Contains(string(blob), testXOXC) || strings.Contains(string(blob), testXOXD) {
+		t.Fatalf("output leaked a credential: %s", blob)
+	}
+}
+
+func TestSlackDeleteMessage_Validation(t *testing.T) {
+	var hit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit = true
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+	h := newProxyHandler(t, true, srv)
+
+	cases := []struct {
+		name    string
+		in      slackDeleteInput
+		wantErr bool
+	}{
+		{"empty channel", slackDeleteInput{Workspace: "https://acme.slack.com", TS: "123.456"}, true},
+		{"bad ts no dot", slackDeleteInput{Workspace: "https://acme.slack.com", Channel: "C1", TS: "123456"}, true},
+		{"bad ts letters", slackDeleteInput{Workspace: "https://acme.slack.com", Channel: "C1", TS: "abc.def"}, true},
+		{"valid", slackDeleteInput{Workspace: "https://acme.slack.com", Channel: "C1", TS: "123.456"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hit = false
+			res, _, err := h.slackDeleteMessage(context.Background(), nil, c.in)
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			isErr := res != nil && res.IsError
+			if isErr != c.wantErr {
+				t.Errorf("IsError = %v, want %v", isErr, c.wantErr)
+			}
+			if c.wantErr && hit {
+				t.Error("invalid input must not reach the network")
+			}
+		})
+	}
+}
+
+func TestSlackAPICall_CannotDeleteEvenWhenGated(t *testing.T) {
+	// Bypass guard: chat.delete is not on any allowlist, so the generic tool
+	// rejects it regardless of the write gate — deletion is reachable only via
+	// slack_delete_message.
+	var hit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit = true
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	h := newProxyHandler(t, true, srv) // allowWrite=true
+	res, _, err := h.slackAPICall(context.Background(), nil, slackAPIInput{
+		Workspace: "https://acme.slack.com",
+		Method:    "chat.delete",
+		Params:    map[string]any{"channel": "C1", "ts": "123.456"},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Fatal("slack_api_call must reject chat.delete")
+	}
+	if hit {
+		t.Fatal("chat.delete via slack_api_call must not reach the network")
 	}
 }
 
