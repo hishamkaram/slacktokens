@@ -131,20 +131,10 @@ func newServerWithConfig(cfg mcpConfig) *mcp.Server {
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name:  "slack_api_call",
-		Title: "Call the Slack Web API via credential proxy",
-		Description: "Calls a Slack Web API method on your behalf, injecting your " +
-			"Slack credentials server-side so they NEVER enter the AI's context. " +
-			"Give a `workspace` (Slack URL), a `method` (e.g. conversations.history " +
-			"or chat.postMessage), and its `params`. Only allowlisted methods are " +
-			"permitted; write methods (chat.postMessage, reactions.add, " +
-			"conversations.mark, conversations.open) require the server to be " +
-			"started with SLACKTOKENS_MCP_ALLOW_WRITE=1, and destructive methods " +
-			"(chat.delete, chat.update) require SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 " +
-			"in addition. IMPORTANT: this tool is ONLINE (it " +
-			"contacts slack.com) and the Slack response is returned to the AI — the " +
-			"credential is protected, but the response data is not, and some " +
-			"responses contain private workspace information.",
+		Name:        "slack_api_call",
+		Title:       "Call the Slack Web API via credential proxy",
+		Description: toolDescription(cfg),
+		InputSchema: slackAPIInputSchema(),
 		Annotations: proxyAnnotations("Call the Slack Web API via credential proxy", cfg.allowWrite && cfg.allowDestructive),
 	}, h.slackAPICall)
 

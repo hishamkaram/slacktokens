@@ -153,7 +153,7 @@ Tools:
 | --- | --- |
 | `slack_api_call` | result of a Slack Web API call made with injected credentials (credential-broker proxy) |
 
-`slack_api_call` advertises `openWorldHint: true` (it reaches the network), `readOnlyHint: false` (it can call write methods when enabled), and `destructiveHint: false` (the curated write set is additive only). The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
+`slack_api_call` advertises `openWorldHint: true` (it reaches the network), `readOnlyHint: false` (it can call write methods when enabled), and `destructiveHint` that tracks the destructive gate (`true` only when both the write and destructive gates are open, otherwise `false`). The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
 
 Built against the official Go SDK (`github.com/modelcontextprotocol/go-sdk@v1.6.0`) and the **MCP 2025-11-25** specification.
 
@@ -167,6 +167,9 @@ It is **fail-closed**:
 - Write methods (`chat.postMessage`, `reactions.add`, `conversations.mark`, `conversations.open`) run **only** when the server is started with `SLACKTOKENS_MCP_ALLOW_WRITE=1` (exactly `1`). These are additive — nothing that overwrites or deletes.
 - Destructive methods (`chat.delete`, `chat.update`) require a **second key**: **both** `SLACKTOKENS_MCP_ALLOW_WRITE=1` **and** `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1`. When the destructive gate is open the tool advertises `destructiveHint: true`. `admin.*`, `conversations.archive`, etc. remain unexposed.
 - Redirects are never followed (Go would otherwise re-send the `Authorization`/`Cookie` headers to the redirect target — a header-leak/SSRF risk). The API host is derived from the workspace URL: `*.slack-gov.com` workspaces hit the GovSlack API host, everything else `slack.com`.
+- A caller-supplied `token` argument is stripped before the request, so the server-injected credential is always authoritative and cannot be shadowed.
+
+**Harness compatibility.** Some MCP harnesses cannot send a nested object argument (they drop it, producing `params: {}`). So `slack_api_call` accepts the method arguments three ways, and the tool's input schema allows all of them: (1) `params` as a JSON object; (2) `params` as a JSON **string** containing that object; (3) the arguments placed **directly at the top level** next to `method`. The server normalizes whatever shape arrives. The tool `description` also enumerates the full allowlist and the live gate state, so an agent needs no external docs.
 
 > Scope of protection: this tool protects the **credential**, not the **response**. The Slack JSON it returns enters the model context like any other tool output and can contain private workspace data. Treat a model with this tool as able to act in Slack with your session's authority (bounded by the allowlist and the write gate).
 
