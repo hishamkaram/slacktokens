@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/hishamkaram/slacktokens"
@@ -113,11 +114,168 @@ func allowDestructiveFromEnv() bool {
 	return os.Getenv(allowDestructiveEnv) == "1"
 }
 
+// slackAPIInputSchema is the tool's input schema, supplied explicitly instead
+// of being reflected from slackAPIInput. The reflected schema sets
+// additionalProperties:false, which makes a strict MCP harness REJECT a call
+// whose arguments it flattened to the top level (the observed Hermes failure,
+// "unexpected additional properties"). This schema allows additional properties
+// at the top level and inside params, so flattened or nested arguments both pass
+// validation; slackAPIInput.UnmarshalJSON then normalizes whatever shape arrives.
+func slackAPIInputSchema() *jsonschema.Schema {
+	// Each &jsonschema.Schema{} must be a DISTINCT instance: the resolver
+	// requires the schema graph to form a tree (no shared nodes).
+	return &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"workspace": {
+				Type:        "string",
+				Description: "Slack workspace URL to act as, e.g. https://acme.slack.com. Selects which account's token to use. Omit when only one workspace is signed in.",
+			},
+			"method": {
+				Type:        "string",
+				Description: "Slack Web API method, e.g. conversations.history or chat.postMessage. Must be on the server's allowlist (see the tool description).",
+			},
+			// No Type constraint: the SDK validator runs on the wire BEFORE
+			// UnmarshalJSON, so constraining params to "object" would reject the
+			// JSON-string and null shapes this tool also accepts. An open schema
+			// lets any of object/string/null through; UnmarshalJSON normalizes it.
+			"params": {
+				Description: "Method arguments, normally a JSON object, e.g. {\"query\":\"from:me\"}. May also be a JSON string containing that object, or omitted when the arguments are placed directly at the top level next to method.",
+			},
+		},
+		Required:             []string{"method"},
+		AdditionalProperties: &jsonschema.Schema{},
+	}
+}
+
+// sortedMethods returns m's keys sorted, for a stable tool description.
+func sortedMethods(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// toolDescription builds slack_api_call's description, enumerating the EXACT
+// allowlist and the live gate state so a calling agent chooses a valid method
+// and knows up front which calls will be rejected.
+func toolDescription(cfg mcpConfig) string {
+	state := func(on bool) string {
+		if on {
+			return "ENABLED"
+		}
+		return "disabled"
+	}
+	var b strings.Builder
+	b.WriteString("Calls a Slack Web API method on your behalf, injecting your Slack credentials ")
+	b.WriteString("server-side so they NEVER enter the AI's context. Provide `method`, `params` (its ")
+	b.WriteString("arguments), and optionally `workspace` (the Slack URL to act as; omit when only one ")
+	b.WriteString("account is signed in). ONLY these allowlisted methods work — any other method is rejected:\n")
+	b.WriteString("• READ (always available): " + strings.Join(sortedMethods(readMethods), ", ") + "\n")
+	b.WriteString("• WRITE [" + state(cfg.allowWrite) + "]: " + strings.Join(sortedMethods(writeMethods), ", ") + "\n")
+	b.WriteString("• DESTRUCTIVE [" + state(cfg.allowWrite && cfg.allowDestructive) + "]: " + strings.Join(sortedMethods(destructiveMethods), ", ") + "\n")
+	b.WriteString("How to use: start with auth.test to confirm the active account; find a channel ID via ")
+	b.WriteString("conversations.list, then e.g. chat.postMessage with params {\"channel\":\"C0123\",\"text\":\"hi\"}. ")
+	b.WriteString("Nested values (blocks, attachments) are JSON-encoded automatically. ")
+	b.WriteString("Passing arguments: put them in `params` as a JSON object; if your harness cannot send a ")
+	b.WriteString("nested object, you may instead place the arguments at the top level next to `method`, or ")
+	b.WriteString("pass `params` as a JSON string — all three are accepted. ")
+	b.WriteString("IMPORTANT: this tool is ONLINE (contacts slack.com) and the Slack response is returned ")
+	b.WriteString("to the AI — the credential is protected, but response data is not and may contain private ")
+	b.WriteString("workspace information.")
+	return b.String()
+}
+
 // slackAPIInput is the tool's input.
 type slackAPIInput struct {
 	Workspace string         `json:"workspace,omitempty" jsonschema:"Slack workspace URL to act as, e.g. https://acme.slack.com — selects which xoxc token to use. Omit when only one workspace is signed in."`
 	Method    string         `json:"method"    jsonschema:"Slack Web API method, e.g. conversations.history or chat.postMessage. Must be on the server's allowlist."`
-	Params    map[string]any `json:"params,omitempty" jsonschema:"method arguments, e.g. {\"channel\":\"C123\",\"text\":\"hi\"}. Nested values (blocks, attachments) are JSON-encoded automatically."`
+	Params    map[string]any `json:"params,omitempty" jsonschema:"Method arguments as a JSON object, e.g. {\"channel\":\"C123\",\"text\":\"hi\"} or {\"query\":\"from:me\"}. Accepted three ways for harness compatibility: (1) a JSON object here; (2) a JSON string here; (3) the arguments placed directly at the top level alongside method. Nested values (blocks, attachments) are JSON-encoded automatically."`
+}
+
+// reservedInputKeys are the top-level fields that are NOT Slack method
+// arguments, so they are never folded into Params.
+var reservedInputKeys = map[string]bool{"workspace": true, "method": true, "params": true}
+
+// UnmarshalJSON makes the tool robust to how different MCP harnesses serialize
+// a nested argument object. Some harnesses drop the contents of a nested object
+// property (arriving as "params": {}), stringify it, or flatten the arguments to
+// the top level. This recovers the Slack method arguments in all those shapes:
+//  1. params as a JSON object (the normal case),
+//  2. params as a JSON string containing an object,
+//  3. method arguments placed at the top level next to "method".
+//
+// A top-level key never overrides a key already present inside params.
+func (in *slackAPIInput) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if v, ok := raw["workspace"]; ok {
+		if err := json.Unmarshal(v, &in.Workspace); err != nil {
+			return fmt.Errorf("workspace: %w", err)
+		}
+	}
+	if v, ok := raw["method"]; ok {
+		if err := json.Unmarshal(v, &in.Method); err != nil {
+			return fmt.Errorf("method: %w", err)
+		}
+	}
+	in.Params = map[string]any{}
+	if v, ok := raw["params"]; ok {
+		obj, err := decodeParams(v)
+		if err != nil {
+			return fmt.Errorf("params: %w", err)
+		}
+		for k, val := range obj {
+			in.Params[k] = val
+		}
+	}
+	// Fold any remaining top-level keys (flattened arguments) into params,
+	// without overriding an explicit params entry.
+	for k, v := range raw {
+		if reservedInputKeys[k] {
+			continue
+		}
+		if _, exists := in.Params[k]; exists {
+			continue
+		}
+		var val any
+		if err := json.Unmarshal(v, &val); err != nil {
+			return fmt.Errorf("argument %q: %w", k, err)
+		}
+		in.Params[k] = val
+	}
+	return nil
+}
+
+// decodeParams accepts a JSON object, a JSON string containing an object, or an
+// empty/null value, and returns the resulting map (empty when there is nothing).
+func decodeParams(v json.RawMessage) (map[string]any, error) {
+	trimmed := strings.TrimSpace(string(v))
+	if trimmed == "" || trimmed == "null" {
+		return map[string]any{}, nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(v, &obj); err == nil {
+		return obj, nil
+	}
+	// Maybe it is a JSON string wrapping a JSON object.
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return nil, fmt.Errorf("not a JSON object or string: %s", trimmed)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return map[string]any{}, nil
+	}
+	var obj2 map[string]any
+	if err := json.Unmarshal([]byte(s), &obj2); err != nil {
+		return nil, fmt.Errorf("string value is not a JSON object: %q", s)
+	}
+	return obj2, nil
 }
 
 // slackAPIOutput is the tool's result. It never contains the token or cookie.
@@ -210,6 +368,20 @@ func validateMethod(method string, allowWrite, allowDestructive bool) error {
 // encodeParams flattens params into a urlencoded form body. Scalars become
 // their string form; any array/object value is JSON-encoded, as Slack's
 // form-encoded endpoints expect for fields like blocks and attachments.
+// stripAuthParams returns a copy of params with any auth-bearing key removed, so
+// a caller cannot supply a Slack "token" form field to override or shadow the
+// server-injected credential. Matching is case-insensitive.
+func stripAuthParams(params map[string]any) map[string]any {
+	out := make(map[string]any, len(params))
+	for k, v := range params {
+		if strings.EqualFold(strings.TrimSpace(k), "token") {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 func encodeParams(params map[string]any) (url.Values, error) {
 	v := url.Values{}
 	for key, val := range params {
@@ -419,6 +591,12 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 	if err != nil {
 		return errorResult(err), slackAPIOutput{}
 	}
+
+	// Strip any caller-supplied auth parameter: the credential is injected
+	// server-side via the Authorization header and must be authoritative. A
+	// "token" form field would otherwise let a caller shadow or confuse the
+	// server credential. (Case-insensitive; Slack treats the key as "token".)
+	params = stripAuthParams(params)
 
 	form, err := encodeParams(params)
 	if err != nil {

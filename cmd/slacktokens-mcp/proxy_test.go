@@ -56,6 +56,38 @@ func TestAllowWriteFromEnv(t *testing.T) {
 	}
 }
 
+// TestToolDescription_ListsAllowlistAndGateState: the description must name
+// every allowlisted method (so an agent picks a valid one) and reflect the live
+// gate state, so a weaker model is not left guessing method names.
+func TestToolDescription_ListsAllowlistAndGateState(t *testing.T) {
+	all := func() []string {
+		var s []string
+		for m := range readMethods {
+			s = append(s, m)
+		}
+		for m := range writeMethods {
+			s = append(s, m)
+		}
+		for m := range destructiveMethods {
+			s = append(s, m)
+		}
+		return s
+	}
+	d := toolDescription(mcpConfig{allowWrite: true, allowDestructive: true})
+	for _, m := range all() {
+		if !strings.Contains(d, m) {
+			t.Errorf("description missing method %q", m)
+		}
+	}
+	if !strings.Contains(d, "WRITE [ENABLED]") || !strings.Contains(d, "DESTRUCTIVE [ENABLED]") {
+		t.Errorf("both-gates description should show ENABLED; got:\n%s", d)
+	}
+	off := toolDescription(mcpConfig{})
+	if !strings.Contains(off, "WRITE [disabled]") || !strings.Contains(off, "DESTRUCTIVE [disabled]") {
+		t.Errorf("default description should show disabled; got:\n%s", off)
+	}
+}
+
 func TestAllowDestructiveFromEnv(t *testing.T) {
 	// Same strict exact-"1" rule as the write gate (fail closed).
 	cases := []struct {
@@ -862,6 +894,7 @@ func TestSlackAPICall_EndToEndViaMCP(t *testing.T) {
 	})
 	mcp.AddTool(mcpSrv, &mcp.Tool{
 		Name:        "slack_api_call",
+		InputSchema: slackAPIInputSchema(),
 		Annotations: proxyAnnotations("proxy", false),
 	}, h.slackAPICall)
 
@@ -896,5 +929,178 @@ func TestSlackAPICall_EndToEndViaMCP(t *testing.T) {
 	}
 	if !strings.Contains(string(blob), `\"ok\":true`) && !strings.Contains(string(blob), `"ok":true`) {
 		t.Errorf("expected slack ok:true in result: %s", blob)
+	}
+}
+
+// TestSlackAPIInput_UnmarshalRobustness proves the tool recovers Slack method
+// arguments regardless of how a harness serializes them: nested object, nested
+// as a JSON string, flattened to the top level, or an empty params object.
+func TestSlackAPIInput_UnmarshalRobustness(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want map[string]any
+	}{
+		{"nested object", `{"method":"search.messages","params":{"query":"from:me"}}`, map[string]any{"query": "from:me"}},
+		{"params as JSON string", `{"method":"search.messages","params":"{\"query\":\"from:me\"}"}`, map[string]any{"query": "from:me"}},
+		{"flattened top level", `{"method":"search.messages","query":"from:me","count":5}`, map[string]any{"query": "from:me", "count": float64(5)}},
+		{"empty params plus top level", `{"method":"search.messages","params":{},"query":"x"}`, map[string]any{"query": "x"}},
+		{"params wins over top level", `{"method":"chat.postMessage","params":{"text":"a"},"text":"b"}`, map[string]any{"text": "a"}},
+		{"null params", `{"method":"auth.test","params":null}`, map[string]any{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var in slackAPIInput
+			if err := json.Unmarshal([]byte(c.json), &in); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if len(in.Params) != len(c.want) {
+				t.Fatalf("params = %#v, want %#v", in.Params, c.want)
+			}
+			for k, v := range c.want {
+				if in.Params[k] != v {
+					t.Errorf("params[%q] = %#v, want %#v", k, in.Params[k], v)
+				}
+			}
+		})
+	}
+}
+
+// TestSlackAPIInput_UnmarshalPreservesWorkspaceMethod: reserved keys are not
+// folded into params.
+func TestSlackAPIInput_UnmarshalPreservesWorkspaceMethod(t *testing.T) {
+	var in slackAPIInput
+	if err := json.Unmarshal([]byte(`{"workspace":"https://acme.slack.com","method":"conversations.list","params":{"limit":10}}`), &in); err != nil {
+		t.Fatal(err)
+	}
+	if in.Workspace != "https://acme.slack.com" || in.Method != "conversations.list" {
+		t.Fatalf("workspace/method lost: %+v", in)
+	}
+	if _, bad := in.Params["workspace"]; bad {
+		t.Error("workspace leaked into params")
+	}
+	if _, bad := in.Params["method"]; bad {
+		t.Error("method leaked into params")
+	}
+}
+
+// TestSlackAPICall_EndToEnd_FlattenedArgs proves the full MCP wire path recovers
+// method arguments when a harness flattens them to the top level (the observed
+// Hermes "params": {} failure). If the SDK validated the schema strictly and
+// dropped unknown top-level keys, Slack would receive no "query" and this fails.
+func TestSlackAPICall_EndToEnd_FlattenedArgs(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotQuery = r.FormValue("query")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	h := newProxyHandler(t, false, srv)
+	mcpSrv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "v0"}, &mcp.ServerOptions{
+		Capabilities: &mcp.ServerCapabilities{},
+	})
+	mcp.AddTool(mcpSrv, &mcp.Tool{Name: "slack_api_call", InputSchema: slackAPIInputSchema(), Annotations: proxyAnnotations("proxy", false)}, h.slackAPICall)
+
+	srvT, cliT := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := mcpSrv.Connect(ctx, srvT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "v0"}, nil)
+	cs, err := client.Connect(ctx, cliT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	// Flattened: "query" sits at the top level, params empty — the Hermes shape.
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name: "slack_api_call",
+		Arguments: map[string]any{
+			"workspace": "https://acme.slack.com",
+			"method":    "search.messages",
+			"params":    map[string]any{},
+			"query":     "from:me",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected IsError: %+v", res.Content)
+	}
+	if gotQuery != "from:me" {
+		t.Fatalf("Slack received query=%q, want from:me (flattened args not recovered)", gotQuery)
+	}
+}
+
+// TestStripAuthParams: a caller-supplied token (any case) is removed so it can
+// never shadow the server-injected credential; other params survive.
+func TestStripAuthParams(t *testing.T) {
+	in := map[string]any{"token": "xoxc-evil", "Token": "x2", " TOKEN ": "x3", "channel": "C1", "text": "hi"}
+	out := stripAuthParams(in)
+	for k := range out {
+		if strings.EqualFold(strings.TrimSpace(k), "token") {
+			t.Fatalf("auth param survived: %q", k)
+		}
+	}
+	if out["channel"] != "C1" || out["text"] != "hi" {
+		t.Fatalf("non-auth params lost: %#v", out)
+	}
+}
+
+// TestSlackAPICall_EndToEnd_ParamsShapes proves the SDK schema validator (which
+// runs on the wire before UnmarshalJSON) accepts params as a JSON string and as
+// null — the shapes the tool advertises — not just an object.
+func TestSlackAPICall_EndToEnd_ParamsShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		want string // expected query reaching Slack ("" = none)
+	}{
+		{"object", map[string]any{"method": "search.messages", "params": map[string]any{"query": "a"}}, "a"},
+		{"json string", map[string]any{"method": "search.messages", "params": `{"query":"b"}`}, "b"},
+		{"null params + flattened", map[string]any{"method": "search.messages", "params": nil, "query": "c"}, "c"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				gotQuery = r.FormValue("query")
+				_, _ = io.WriteString(w, `{"ok":true}`)
+			}))
+			defer srv.Close()
+			h := newProxyHandler(t, false, srv)
+			s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "v0"}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}})
+			mcp.AddTool(s, &mcp.Tool{Name: "slack_api_call", InputSchema: slackAPIInputSchema(), Annotations: proxyAnnotations("p", false)}, h.slackAPICall)
+			st, ct := mcp.NewInMemoryTransports()
+			ctx := context.Background()
+			if _, err := s.Connect(ctx, st, nil); err != nil {
+				t.Fatal(err)
+			}
+			cl := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "v0"}, nil)
+			cs, err := cl.Connect(ctx, ct, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = cs.Close() }()
+			args := map[string]any{"workspace": "https://acme.slack.com"}
+			for k, v := range c.args {
+				args[k] = v
+			}
+			res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "slack_api_call", Arguments: args})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if res.IsError {
+				t.Fatalf("unexpected IsError: %+v", res.Content)
+			}
+			if gotQuery != c.want {
+				t.Fatalf("query=%q want %q", gotQuery, c.want)
+			}
+		})
 	}
 }
