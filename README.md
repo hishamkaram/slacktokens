@@ -164,7 +164,8 @@ Built against the official Go SDK (`github.com/modelcontextprotocol/go-sdk@v1.6.
 It is **fail-closed**:
 
 - Only methods on a curated allowlist run. Reads (`auth.test`, `conversations.history`, `users.info`, `search.messages`, …) are always available.
-- Write methods (`chat.postMessage`, `reactions.add`, `conversations.mark`) run **only** when the server is started with `SLACKTOKENS_MCP_ALLOW_WRITE=1` (exactly `1`). These are additive only — nothing that overwrites or deletes. Destructive/admin methods (`chat.update`, `chat.delete`, `conversations.archive`, `admin.*`, …) are never exposed.
+- Write methods (`chat.postMessage`, `reactions.add`, `conversations.mark`, `conversations.open`) run **only** when the server is started with `SLACKTOKENS_MCP_ALLOW_WRITE=1` (exactly `1`). These are additive — nothing that overwrites or deletes.
+- Destructive methods (`chat.delete`, `chat.update`) require a **second key**: **both** `SLACKTOKENS_MCP_ALLOW_WRITE=1` **and** `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1`. When the destructive gate is open the tool advertises `destructiveHint: true`. `admin.*`, `conversations.archive`, etc. remain unexposed.
 - Redirects are never followed (Go would otherwise re-send the `Authorization`/`Cookie` headers to the redirect target — a header-leak/SSRF risk). The API host is derived from the workspace URL: `*.slack-gov.com` workspaces hit the GovSlack API host, everything else `slack.com`.
 
 > Scope of protection: this tool protects the **credential**, not the **response**. The Slack JSON it returns enters the model context like any other tool output and can contain private workspace data. Treat a model with this tool as able to act in Slack with your session's authority (bounded by the allowlist and the write gate).
@@ -222,10 +223,11 @@ Omit the `env` block for read-only. Use the binary's absolute path for `command`
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `SLACKTOKENS_MCP_ALLOW_WRITE` | unset | Enables the additive write methods on `slack_api_call` (`chat.postMessage`, `reactions.add`, `conversations.mark`). |
+| `SLACKTOKENS_MCP_ALLOW_WRITE` | unset | Enables the additive write methods on `slack_api_call` (`chat.postMessage`, `reactions.add`, `conversations.mark`, `conversations.open`). |
+| `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE` | unset | **Together with** `SLACKTOKENS_MCP_ALLOW_WRITE`, enables destructive methods (`chat.delete`, `chat.update`) on `slack_api_call`. Both keys required. |
 | `SLACKTOKENS_PROFILE_DIR` | unset | Overrides Slack profile-directory discovery (trusted/test-only: opened directly). |
 
-`SLACKTOKENS_MCP_ALLOW_WRITE` is enabled only when its value is **exactly `1`** — any other value, including padded strings such as `" 1 "`, leaves it disabled (fail-closed).
+Both gates are enabled only when their value is **exactly `1`** — any other value, including padded strings such as `" 1 "`, leaves them disabled (fail-closed).
 
 ## How it works
 

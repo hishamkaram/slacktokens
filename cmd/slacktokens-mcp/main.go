@@ -55,6 +55,10 @@ type mcpConfig struct {
 	// allowWrite, when true, lets the slack_api_call proxy invoke the curated
 	// WRITE method set. Sourced from SLACKTOKENS_MCP_ALLOW_WRITE; default false.
 	allowWrite bool
+	// allowDestructive, when true AND allowWrite is also true, additionally lets
+	// the proxy invoke the DESTRUCTIVE method set (chat.delete, chat.update).
+	// Sourced from SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE; default false (two-key gate).
+	allowDestructive bool
 }
 
 // handlers carries the dependencies shared by every tool handler.
@@ -84,15 +88,20 @@ func errorResult(err error) *mcp.CallToolResult {
 
 // proxyAnnotations is for slack_api_call. It reaches the network
 // (OpenWorldHint=true) and can mutate remote state when the write gate is open
-// (ReadOnlyHint=false). The curated write set is additive only, so it is still
-// non-destructive. Each call is a fresh network request, so it is not idempotent.
-func proxyAnnotations(title string) *mcp.ToolAnnotations {
+// (ReadOnlyHint=false). DestructiveHint tracks the destructive gate: when it is
+// open the tool can invoke chat.delete/chat.update, so the hint is true and a
+// host should confirm. Each call is a fresh network request, so not idempotent.
+func proxyAnnotations(title string, destructive bool) *mcp.ToolAnnotations {
 	falsePtr := false
 	truePtr := true
+	destructiveHint := &falsePtr
+	if destructive {
+		destructiveHint = &truePtr
+	}
 	return &mcp.ToolAnnotations{
 		Title:           title,
 		ReadOnlyHint:    false,
-		DestructiveHint: &falsePtr,
+		DestructiveHint: destructiveHint,
 		IdempotentHint:  false,
 		OpenWorldHint:   &truePtr,
 	}
@@ -101,7 +110,7 @@ func proxyAnnotations(title string) *mcp.ToolAnnotations {
 // newServer builds the MCP server with configuration resolved from the
 // environment. Use newServerWithConfig in tests to drive a specific config.
 func newServer() *mcp.Server {
-	return newServerWithConfig(mcpConfig{allowWrite: allowWriteFromEnv()})
+	return newServerWithConfig(mcpConfig{allowWrite: allowWriteFromEnv(), allowDestructive: allowDestructiveFromEnv()})
 }
 
 // newServerWithConfig builds the MCP server for a specific config.
@@ -128,12 +137,15 @@ func newServerWithConfig(cfg mcpConfig) *mcp.Server {
 			"Slack credentials server-side so they NEVER enter the AI's context. " +
 			"Give a `workspace` (Slack URL), a `method` (e.g. conversations.history " +
 			"or chat.postMessage), and its `params`. Only allowlisted methods are " +
-			"permitted; write methods require the server to be started with " +
-			"SLACKTOKENS_MCP_ALLOW_WRITE=1. IMPORTANT: this tool is ONLINE (it " +
+			"permitted; write methods (chat.postMessage, reactions.add, " +
+			"conversations.mark, conversations.open) require the server to be " +
+			"started with SLACKTOKENS_MCP_ALLOW_WRITE=1, and destructive methods " +
+			"(chat.delete, chat.update) require SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 " +
+			"in addition. IMPORTANT: this tool is ONLINE (it " +
 			"contacts slack.com) and the Slack response is returned to the AI — the " +
 			"credential is protected, but the response data is not, and some " +
 			"responses contain private workspace information.",
-		Annotations: proxyAnnotations("Call the Slack Web API via credential proxy"),
+		Annotations: proxyAnnotations("Call the Slack Web API via credential proxy", cfg.allowWrite && cfg.allowDestructive),
 	}, h.slackAPICall)
 
 	return server
@@ -159,7 +171,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := newServerWithConfig(mcpConfig{allowWrite: allowWriteFromEnv()})
+	server := newServerWithConfig(mcpConfig{allowWrite: allowWriteFromEnv(), allowDestructive: allowDestructiveFromEnv()})
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 		return err
