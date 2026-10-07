@@ -14,18 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 )
-
-// slackLocalStatePath returns the path to Slack's Chromium "Local State"
-// JSON file, used to obtain the DPAPI-wrapped cookie master key on Windows.
-func slackLocalStatePath() (string, error) {
-	root, err := slackProfileDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, "Local State"), nil
-}
 
 // dpapiUnprotectFn is the test seam for DPAPI decryption. The default
 // implementation calls the Win32 CryptUnprotectData API via x/sys/windows;
@@ -51,12 +40,12 @@ func systemKeychainPassword() (string, error) {
 // v20 (Chrome 127+ app-bound encryption) is NOT used by Slack 4.50 because
 // Electron does not ship the IElevator service that Chromium relies on. If a
 // v20 row is encountered, we surface a clear error rather than silently fail.
-func newPlatformDecrypter() (cookieDecrypter, error) {
-	statePath, err := slackLocalStatePath()
+func newPlatformDecrypter(root *os.Root) (cookieDecrypter, error) {
+	data, err := root.ReadFile("Local State")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read Slack Local State: %w", err)
 	}
-	key, err := readLocalStateMasterKey(statePath)
+	key, err := readLocalStateMasterKey(data)
 	if err != nil {
 		return nil, fmt.Errorf("read Slack Local State: %w", err)
 	}
@@ -72,11 +61,7 @@ func newPlatformDecrypter() (cookieDecrypter, error) {
 //
 // The decoded value begins with the literal ASCII bytes "DPAPI" followed by
 // a CryptProtectData blob; the blob unprotects to a 32-byte key.
-func readLocalStateMasterKey(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+func readLocalStateMasterKey(data []byte) ([]byte, error) {
 	var parsed struct {
 		OSCrypt struct {
 			EncryptedKey string `json:"encrypted_key"`

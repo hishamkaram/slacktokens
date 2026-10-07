@@ -5,10 +5,12 @@
 
 package slacktokens
 
+import "os"
+
 func systemKeychainPassword() (string, error) {
 	return "", ErrUnsupportedOS
 }
 
-func newPlatformDecrypter() (cookieDecrypter, error) {
+func newPlatformDecrypter(_ *os.Root) (cookieDecrypter, error) {
 	return nil, ErrUnsupportedOS
 }

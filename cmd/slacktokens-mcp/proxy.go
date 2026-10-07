@@ -37,14 +37,8 @@ import (
 
 const (
 	// allowWriteEnv opts in to the curated WRITE method set. Unset (default)
-	// keeps the proxy read-only. Mirrors allowRawEnv in secrets.go.
+	// keeps the proxy read-only.
 	allowWriteEnv = "SLACKTOKENS_MCP_ALLOW_WRITE"
-
-	// allowDestructiveEnv opts in to destructive methods (currently chat.delete,
-	// via the slack_delete_message tool). It is a SECOND key: destructive actions
-	// are enabled only when BOTH allowWriteEnv and allowDestructiveEnv are set.
-	// Unset (default) keeps deletion unavailable.
-	allowDestructiveEnv = "SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE"
 
 	// slackAPIBaseURL is the canonical Web API host. xoxc+d authenticates here.
 	slackAPIBaseURL = "https://slack.com/api/"
@@ -89,23 +83,12 @@ var writeMethods = map[string]bool{
 // allowlist is the real authority; this is a cheap structural guard.
 var methodPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$`)
 
-// tsPattern matches a Slack message timestamp id, e.g. "1401383885.000061".
-var tsPattern = regexp.MustCompile(`^\d+\.\d+$`)
-
 // allowWriteFromEnv reports whether the operator opted in to write methods.
 // The gate is deliberately STRICT — the value must be EXACTLY "1" (no
-// surrounding whitespace, not the looser truthy set allowRawFromEnv honours),
-// so an accidentally padded value fails closed and enabling remote writes is
-// always an explicit, unambiguous choice.
+// surrounding whitespace), so an accidentally padded value fails closed and
+// enabling remote writes is always an explicit, unambiguous choice.
 func allowWriteFromEnv() bool {
 	return os.Getenv(allowWriteEnv) == "1"
-}
-
-// allowDestructiveFromEnv reports whether the operator opted in to destructive
-// methods. Exact-"1" like the write gate (fail closed on anything else). It is
-// only meaningful together with allowWriteFromEnv (see the two-key gate).
-func allowDestructiveFromEnv() bool {
-	return os.Getenv(allowDestructiveEnv) == "1"
 }
 
 // slackAPIInput is the tool's input.
@@ -136,19 +119,47 @@ func (h *handlers) credsResult() (slacktokens.Result, error) {
 }
 
 // client returns the HTTP client for proxied calls. Tests inject a stub.
+//
+// Redirects are NEVER followed: Go's default client re-sends the Authorization
+// and Cookie headers on a same-host (or subdomain) redirect, so a malicious or
+// compromised endpoint answering 30x with a Location of, say,
+// https://evil.slack.com/collect or http://127.0.0.1/ would receive the live
+// credential (a header-leak + SSRF). ErrUseLastResponse makes Do return the 30x
+// response itself without following it, so the credential is never resent.
 func (h *handlers) client() *http.Client {
 	if h.httpClient != nil {
 		return h.httpClient
 	}
-	return &http.Client{Timeout: slackRequestTimeout}
+	return &http.Client{
+		Timeout: slackRequestTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
-// baseURL returns the Slack API base. Tests point this at an httptest server.
-func (h *handlers) baseURL() string {
+// baseURL returns the Slack Web API base for the given workspace URL. Tests
+// point this at an httptest server via baseURLStr. In production it is derived
+// from the workspace host so GovSlack (*.slack-gov.com) workspaces hit the
+// GovSlack API host instead of the commercial one; everything else uses
+// slack.com.
+func (h *handlers) baseURL(workspaceURL string) string {
 	if h.baseURLStr != "" {
 		return h.baseURLStr
 	}
+	if host := hostOf(workspaceURL); strings.HasSuffix(host, ".slack-gov.com") || host == "slack-gov.com" {
+		return "https://slack-gov.com/api/"
+	}
 	return slackAPIBaseURL
+}
+
+// hostOf returns the lowercased host of a workspace URL, or "" if unparseable.
+func hostOf(workspaceURL string) string {
+	u, err := url.Parse(workspaceURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // validateMethod enforces the shape + allowlist, fail-closed.
@@ -235,7 +246,11 @@ func collectSecrets(r slacktokens.Result) []string {
 	const minVariantLen = 8
 	set := make(map[string]struct{})
 	add := func(s string) {
-		if s == "" {
+		// Skip short values: real credentials (xoxc tokens, the d cookie) are long,
+		// whereas a short value (e.g. a numeric d-s) would blanket-match ordinary
+		// response text — a message `ts` second, a count — and corrupt it. A short
+		// value is also not usefully secret on its own.
+		if len(s) < minVariantLen {
 			return
 		}
 		set[s] = struct{}{} // the raw value is always redacted
@@ -286,35 +301,59 @@ func redactSecrets(s string, secrets []string) string {
 	return s
 }
 
-// cookieHeader builds the Cookie header value. The d cookie is required; d-s is
-// appended only when present. Slack's d cookie is domain-wide on slack.com and
-// shared across every workspace (only the xoxc token is per-workspace), so a
-// single d value authenticates any workspace selection. If the store holds two
-// DIFFERENT d values (e.g. a stale session from a previous login), the pairing
-// is ambiguous — rather than pick one arbitrarily (last-row-wins), fail closed
-// so a destructive call can't run under the wrong session.
-func cookieHeader(cookies []slacktokens.Cookie) (string, error) {
+// cookieHeader builds the Cookie header value for the given workspace. The d
+// cookie is required; d-s is appended only when present. Slack's d cookie is
+// domain-wide and shared across every workspace on the SAME host family, but a
+// user signed into both commercial Slack (.slack.com) and GovSlack
+// (.slack-gov.com) has two distinct d cookies on different domains — so cookies
+// are first filtered to those whose host matches the target workspace. If, after
+// that filter, two DIFFERENT d (or d-s) values remain (e.g. a stale session from
+// a previous login on the same domain), the pairing is ambiguous — rather than
+// pick one arbitrarily, fail closed so a call can't run under the wrong session.
+func cookieHeader(cookies []slacktokens.Cookie, workspaceURL string) (string, error) {
+	wantHost := hostOf(workspaceURL)
 	var d, ds string
-	haveD := false
+	haveD, haveDS := false, false
 	for _, c := range cookies {
+		// Skip cookies that carry a host and don't apply to this workspace. A
+		// cookie with no recorded host is treated as applicable (back-compat).
+		if c.Host != "" && wantHost != "" && !cookieHostMatches(wantHost, c.Host) {
+			continue
+		}
 		switch c.Name {
 		case "d":
 			if haveD && c.Value != d {
-				return "", errors.New("multiple distinct 'd' cookies found — ambiguous Slack session; sign out of stale workspaces and retry")
+				return "", errors.New("multiple distinct 'd' cookies found for this workspace — ambiguous Slack session; sign out of stale workspaces and retry")
 			}
 			d, haveD = c.Value, true
 		case "d-s":
-			ds = c.Value
+			if haveDS && c.Value != ds {
+				return "", errors.New("multiple distinct 'd-s' cookies found for this workspace — ambiguous Slack session; sign out of stale workspaces and retry")
+			}
+			ds, haveDS = c.Value, true
 		}
 	}
 	if d == "" {
-		return "", errors.New("no d cookie available — cannot authenticate to Slack")
+		return "", errors.New("no d cookie available for this workspace — cannot authenticate to Slack")
 	}
 	h := "d=" + d
 	if ds != "" {
 		h += "; d-s=" + ds
 	}
 	return h, nil
+}
+
+// cookieHostMatches reports whether a cookie stored under hostKey (a Chromium
+// host_key such as ".slack.com", "slack.com", or "acme.slack.com") applies to
+// the workspace host wantHost. A leading-dot host_key is a domain cookie that
+// matches the domain and all its subdomains; a bare host_key matches exactly.
+func cookieHostMatches(wantHost, hostKey string) bool {
+	hostKey = strings.ToLower(hostKey)
+	if strings.HasPrefix(hostKey, ".") {
+		domain := strings.TrimPrefix(hostKey, ".")
+		return wantHost == domain || strings.HasSuffix(wantHost, "."+domain)
+	}
+	return wantHost == hostKey
 }
 
 func sortedKeys(m map[string]slacktokens.Workspace) []string {
@@ -348,7 +387,7 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 	if ws.Token == "" {
 		return errorResult(fmt.Errorf("workspace %q has no token", wsURL)), slackAPIOutput{}
 	}
-	cookie, err := cookieHeader(r.Cookies)
+	cookie, err := cookieHeader(r.Cookies, wsURL)
 	if err != nil {
 		return errorResult(err), slackAPIOutput{}
 	}
@@ -361,7 +400,8 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 	// Build and send. The URL is constrained: baseURL is a constant and the
 	// caller validated `method` (allowlist or typed tool), so it cannot escape
 	// the /api/ path.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.baseURL()+method, strings.NewReader(form.Encode())) // #nosec G107 -- method is validated by the caller (allowlist or typed tool); base is a constant.
+	secrets := collectSecrets(r)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.baseURL(wsURL)+method, strings.NewReader(form.Encode())) // #nosec G107 -- method is validated by the caller (allowlist or typed tool); base is derived from a hardcoded host set.
 	if err != nil {
 		return errorResult(fmt.Errorf("build request: %w", err)), slackAPIOutput{}
 	}
@@ -389,7 +429,9 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 		Method:    method,
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
-		out.RetryAfter = resp.Header.Get("Retry-After")
+		// Redact defensively: a response header is scrubbed exactly like the body
+		// so a reflected credential can never ride out via Retry-After.
+		out.RetryAfter = redactSecrets(resp.Header.Get("Retry-After"), secrets)
 	}
 
 	// Oversized responses are NOT returned as a truncated slice: a partial body
@@ -406,7 +448,7 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 
 	// Complete response: redact credentials (and their encoding variants) in
 	// full before the body enters the model context, then parse Slack's ok flag.
-	out.Body = redactSecrets(string(data), collectSecrets(r))
+	out.Body = redactSecrets(string(data), secrets)
 	var probe struct {
 		OK bool `json:"ok"`
 	}
@@ -418,38 +460,11 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 
 // slackAPICall is the generic proxy tool handler. It enforces the fail-closed
 // method allowlist, then delegates the transport to call. chat.delete is not on
-// any allowlist, so this tool can never delete — deletion is only reachable via
-// the dedicated slack_delete_message tool.
+// any allowlist, so this tool can never delete.
 func (h *handlers) slackAPICall(ctx context.Context, _ *mcp.CallToolRequest, in slackAPIInput) (*mcp.CallToolResult, slackAPIOutput, error) {
 	if err := validateMethod(in.Method, h.cfg.allowWrite); err != nil {
 		return errorResult(err), slackAPIOutput{}, nil
 	}
 	res, out := h.call(ctx, in.Workspace, in.Method, in.Params)
-	return res, out, nil
-}
-
-// slackDeleteInput is the input to slack_delete_message.
-type slackDeleteInput struct {
-	Workspace string `json:"workspace,omitempty" jsonschema:"Slack workspace URL to act as, e.g. https://acme.slack.com — selects which xoxc token to use. Omit when only one workspace is signed in."`
-	Channel   string `json:"channel" jsonschema:"ID of the channel/DM the message is in, e.g. C0123456789"`
-	TS        string `json:"ts"      jsonschema:"timestamp id of the message to delete, e.g. 1401383885.000061 (the message's 'ts')"`
-}
-
-// slackDeleteMessage deletes one Slack message via chat.delete. Deletion is
-// irreversible — and with an admin token can remove other users' messages — so
-// this is a DESTRUCTIVE tool: it is registered only when BOTH the write and
-// destructive gates are set, is annotated DestructiveHint=true, and takes typed
-// channel+ts so the MCP host shows the exact target in its approval prompt.
-func (h *handlers) slackDeleteMessage(ctx context.Context, _ *mcp.CallToolRequest, in slackDeleteInput) (*mcp.CallToolResult, slackAPIOutput, error) {
-	if strings.TrimSpace(in.Channel) == "" {
-		return errorResult(errors.New("channel is required")), slackAPIOutput{}, nil
-	}
-	if !tsPattern.MatchString(in.TS) {
-		return errorResult(fmt.Errorf("invalid message ts %q (expected a timestamp id like 1401383885.000061)", in.TS)), slackAPIOutput{}, nil
-	}
-	res, out := h.call(ctx, in.Workspace, "chat.delete", map[string]any{
-		"channel": in.Channel,
-		"ts":      in.TS,
-	})
 	return res, out, nil
 }
