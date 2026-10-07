@@ -80,7 +80,7 @@ Sentinel errors (use with `errors.Is`):
 
 ```go
 slacktokens.ErrUnsupportedOS
-slacktokens.ErrLocalStorageLocked   // Slack is still running
+slacktokens.ErrProfileNotFound      // no Slack profile dir found (lists candidates)
 slacktokens.ErrLocalConfigMissing
 slacktokens.ErrLocalConfigParse
 slacktokens.ErrCookieNotFound
@@ -93,7 +93,15 @@ slacktokens                # full Result as indented JSON
 slacktokens -tokens        # tokens map only
 slacktokens -cookie        # the d cookie only (parity with Python)
 slacktokens -cookies       # d + d-s
+slacktokens -out creds.json # write the full Result to a new 0600 file (refuses to overwrite)
 ```
+
+`-out` is the human-run way to get credentials into a file. The MCP server
+never writes or returns credentials (see below), so when you want them on disk
+you run this yourself. The write is atomic (temp file → fsync → rename) and
+refuses to overwrite an existing file. Mode `0600` restricts access by Unix
+permission bits only; on Windows it is not an ACL, so pick a path under your own
+user profile.
 
 Pipe to `jq`:
 
@@ -131,36 +139,23 @@ go install github.com/hishamkaram/slacktokens/cmd/slacktokens-mcp@latest
 
 ### Secure by default — credentials never enter the AI's context
 
-A Slack token or auth cookie is a live credential. Returning one in a tool result would drop it into the calling model's context window, its transcript, and any provider-side logs — a sensitive-information-disclosure risk. So the MCP server is **masked by default**:
+A Slack token or auth cookie is a live credential. Returning one in a tool result would drop it into the calling model's context window, its transcript, and any provider-side logs — a sensitive-information-disclosure risk. So the MCP server exposes **exactly one tool**, `slack_api_call`, and it **never hands a credential to the AI**: it injects the `xoxc` token + `d` cookie server-side, calls `slack.com`, and returns only the (redacted) response.
 
-- The four read tools return only a **masked preview** (e.g. `xoxc-2…3f9a`) — enough for a human to recognise their own credential, useless as a credential itself — plus workspace/cookie metadata.
-- To hand over **real, usable credentials**, call `write_credentials_file`. It writes them to a freshly created local file readable only by your OS user (mode `0600`) and returns **only the path** — the credential values never enter the model context. The file is removed when the server stops.
-
-The credentials file holds the same JSON as `slacktokens` with no flags — `{ "tokens": …, "cookie": …, "cookies": … }` — so you or a script can consume it directly:
+There is deliberately **no tool that returns or writes raw credentials**. A file written as your OS user — even mode `0600` — is readable by any tool the agent can already run as you, so it would not be a real barrier. When *you* (a human) want the credentials in a file, run the CLI yourself:
 
 ```sh
-TOKEN=$(jq -r '.tokens["https://your-workspace.slack.com"].token' "$CREDS_FILE")
-DCOOKIE=$(jq -r '.cookie.value' "$CREDS_FILE")
-curl 'https://slack.com/api/auth.test' -d "token=$TOKEN" --cookie "d=$DCOOKIE"
+slacktokens -out creds.json   # full Result JSON, mode 0600, refuses to overwrite
 ```
 
 Tools:
 
 | Name | Returns |
 | --- | --- |
-| `get_tokens` | per-workspace name + **masked** `xoxc-*` token preview |
-| `get_cookie` | the `d` auth cookie, **masked** |
-| `get_cookies` | `d` and `d-s` (when present), **masked** |
-| `get_tokens_and_cookie` | masked tokens + cookies in one call |
-| `write_credentials_file` | path to a `0600` JSON file holding the real credentials |
 | `slack_api_call` | result of a Slack Web API call made with injected credentials (credential-broker proxy) |
-| `slack_delete_message` | deletes one message via `chat.delete` (only when the destructive gate is on) |
 
-The four read tools advertise `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. `write_credentials_file` advertises `readOnlyHint: false` and `idempotentHint: false` (it creates a file) and is otherwise non-destructive and offline. `slack_api_call` advertises `openWorldHint: true` (it is the one tool that reaches the network) and `readOnlyHint: false` (it can call write methods when enabled). The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
+`slack_api_call` advertises `openWorldHint: true` (it reaches the network), `readOnlyHint: false` (it can call write methods when enabled), and `destructiveHint: false` (the curated write set is additive only). The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
 
 Built against the official Go SDK (`github.com/modelcontextprotocol/go-sdk@v1.6.0`) and the **MCP 2025-11-25** specification.
-
-> Note: file handoff keeps secrets out of the model context, transcript, and logs. An agent that *also* has shell/file-read tools can still be explicitly instructed to open the file — that is a deliberate user-directed act, not the silent exposure this design prevents.
 
 ### Using credentials without exposing them: the Slack API proxy
 
@@ -170,22 +165,9 @@ It is **fail-closed**:
 
 - Only methods on a curated allowlist run. Reads (`auth.test`, `conversations.history`, `users.info`, `search.messages`, …) are always available.
 - Write methods (`chat.postMessage`, `reactions.add`, `conversations.mark`) run **only** when the server is started with `SLACKTOKENS_MCP_ALLOW_WRITE=1` (exactly `1`). These are additive only — nothing that overwrites or deletes. Destructive/admin methods (`chat.update`, `chat.delete`, `conversations.archive`, `admin.*`, …) are never exposed.
+- Redirects are never followed (Go would otherwise re-send the `Authorization`/`Cookie` headers to the redirect target — a header-leak/SSRF risk). The API host is derived from the workspace URL: `*.slack-gov.com` workspaces hit the GovSlack API host, everything else `slack.com`.
 
 > Scope of protection: this tool protects the **credential**, not the **response**. The Slack JSON it returns enters the model context like any other tool output and can contain private workspace data. Treat a model with this tool as able to act in Slack with your session's authority (bounded by the allowlist and the write gate).
-
-### Deleting messages (destructive)
-
-`chat.delete` is **never** reachable through `slack_api_call` — deletion is irreversible and, with an admin account, can remove *other users'* messages. It is isolated in a dedicated tool, `slack_delete_message` (`workspace`, `channel`, `ts`), behind a **two-key gate**: it is registered only when the server is started with **both** `SLACKTOKENS_MCP_ALLOW_WRITE=1` **and** `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1`.
-
-```bash
-SLACKTOKENS_MCP_ALLOW_WRITE=1 SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 slacktokens-mcp
-```
-
-The tool advertises `destructiveHint: true`, so a well-behaved MCP host asks you to confirm each deletion and shows the exact `channel` + `ts`. Config is read once at startup — change a gate, restart the server. Other destructive/admin methods (`chat.update`, `conversations.archive`, `admin.*`) remain unavailable.
-
-### Opting in to raw output
-
-If you understand the exposure and still want the read tools to inline raw `xoxc-*` tokens and cookie values (the previous behaviour), start the server with the `SLACKTOKENS_MCP_ALLOW_RAW=1` environment variable. Leaving it unset keeps every read tool masked.
 
 ### Add to Claude Code
 
@@ -194,18 +176,12 @@ Requires the `slacktokens-mcp` binary on your `PATH` (via Homebrew or `go instal
 Register the server with the [`claude mcp add`](https://docs.claude.com/en/docs/claude-code/mcp) command. Pick the capability level you want — each is strictly additive and off by default:
 
 ```bash
-# Read-only (masked credentials; the safe default)
+# Read-only (allowlisted read methods; the safe default)
 claude mcp add slacktokens -s user -- slacktokens-mcp
 
 # Read + additive writes (chat.postMessage, reactions.add, conversations.mark)
 claude mcp add slacktokens -s user \
   -e SLACKTOKENS_MCP_ALLOW_WRITE=1 \
-  -- slacktokens-mcp
-
-# Read + writes + message deletion (chat.delete via slack_delete_message)
-claude mcp add slacktokens -s user \
-  -e SLACKTOKENS_MCP_ALLOW_WRITE=1 \
-  -e SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 \
   -- slacktokens-mcp
 ```
 
@@ -218,7 +194,6 @@ claude mcp add slacktokens -s user \
 claude mcp remove slacktokens -s user
 claude mcp add slacktokens -s user \
   -e SLACKTOKENS_MCP_ALLOW_WRITE=1 \
-  -e SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1 \
   -- slacktokens-mcp
 ```
 
@@ -234,29 +209,28 @@ Edit the config file — macOS: `~/Library/Application Support/Claude/claude_des
     "slacktokens": {
       "command": "slacktokens-mcp",
       "env": {
-        "SLACKTOKENS_MCP_ALLOW_WRITE": "1",
-        "SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE": "1"
+        "SLACKTOKENS_MCP_ALLOW_WRITE": "1"
       }
     }
   }
 }
 ```
 
-Omit the `env` block for read-only, or include only `SLACKTOKENS_MCP_ALLOW_WRITE` for writes without deletion. Use the binary's absolute path for `command` if it isn't on `PATH`.
+Omit the `env` block for read-only. Use the binary's absolute path for `command` if it isn't on `PATH`.
 
 ### Environment variables
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `SLACKTOKENS_MCP_ALLOW_WRITE` | unset | Enables the additive write methods on `slack_api_call` (`chat.postMessage`, `reactions.add`, `conversations.mark`). |
-| `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE` | unset | **Together with** `SLACKTOKENS_MCP_ALLOW_WRITE`, registers the destructive `slack_delete_message` tool (`chat.delete`). Both keys are required. |
-| `SLACKTOKENS_MCP_ALLOW_RAW` | unset | Inlines raw `xoxc-*` tokens and cookie values into the read-tool results instead of masked previews. |
+| `SLACKTOKENS_PROFILE_DIR` | unset | Overrides Slack profile-directory discovery (trusted/test-only: opened directly). |
 
-The two capability gates (`SLACKTOKENS_MCP_ALLOW_WRITE`, `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE`) are enabled only when their value is **exactly `1`** — any other value, including padded strings such as `" 1 "`, leaves them disabled (fail-closed). `SLACKTOKENS_MCP_ALLOW_RAW` is more lenient and also accepts `true`/`yes`/`on`.
+`SLACKTOKENS_MCP_ALLOW_WRITE` is enabled only when its value is **exactly `1`** — any other value, including padded strings such as `" 1 "`, leaves it disabled (fail-closed).
 
 ## How it works
 
-1. **Tokens** are read from Slack's Chromium LevelDB localStorage at the OS-specific path; the entry whose key contains `localConfig_v2` is parsed as Chromium-encoded localStorage JSON.
+0. **Discovery** finds Slack's profile directory without running any package manager: each candidate location (Linux native / Snap / Flatpak, macOS direct / App Store, Windows `%APPDATA%`) is opened through a pinned [`os.Root`](https://pkg.go.dev/os#Root). The anchor directory is opened first, then the profile is opened *relative* to it, so Snap's in-profile `current` symlink is followed but any symlink escaping the anchor is refused by the kernel — no hand-rolled path checks. The first valid profile wins (a stderr note is printed if more than one exists); `$SLACKTOKENS_PROFILE_DIR` overrides discovery.
+1. **Tokens** are read from Slack's Chromium LevelDB localStorage; the entry whose key contains `localConfig_v2` is parsed as Chromium-encoded localStorage JSON.
 2. **Cookies** are read from Slack's Chromium SQLite cookies database. The `d` and `d-s` rows for `*.slack.com` are decrypted with:
    - **macOS**: AES-128-CBC, key from PBKDF2-HMAC-SHA1 (1003 iters) of the macOS Keychain item `Slack Safe Storage` (account `Slack Key` for direct download or `Slack App Store Key` for App Store).
    - **Linux**: AES-128-CBC, key from libsecret entry `Slack Safe Storage` via D-Bus Secret Service (1 iter PBKDF2). v10 fallback uses Chromium's hardcoded `peanuts`-derived key.
@@ -268,9 +242,7 @@ No CGO is required on any platform.
 
 ## Running while Slack is open
 
-Works whether Slack is running or quit. If the live LevelDB is locked, the directory is snapshot-copied to a temp location and read from there (LevelDB recovery handles partial log records, so the copy is safe to read). Cookies use SQLite `mode=ro&immutable=1` and never need a snapshot.
-
-In the rare case the snapshot itself can't be read, `ErrLocalStorageLocked` is still returned — quit Slack and retry.
+Works whether Slack is running or quit. Every read goes through a copy: the LevelDB store and the Cookies database (plus any SQLite WAL/journal sidecars) are copied — through the pinned `os.Root`, so the copy is symlink-safe and TOCTOU-safe — into a private `0700` temp directory, and the backends open those copies. A running Slack's LevelDB lock therefore never blocks the read, and no on-disk symlink swap can redirect it. LevelDB's own recovery tolerates a torn log tail; the Cookies copy is opened `mode=ro` (not `immutable`) so a copied WAL is replayed. The LevelDB copy re-checks `CURRENT` and retries a bounded number of times if a compaction raced it.
 
 ## Testing
 

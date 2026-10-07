@@ -9,6 +9,7 @@ package slacktokens
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -81,7 +82,7 @@ func systemKeychainPassword() (string, error) {
 // libsecret password -> PBKDF2(1 iter) -> AES-128-CBC for v11. v10 cookies
 // (rare; written when the keyring is unavailable) use the precomputed
 // linuxV10Key. If libsecret is unreachable we still try v10.
-func newPlatformDecrypter() (cookieDecrypter, error) {
+func newPlatformDecrypter(_ *os.Root) (cookieDecrypter, error) {
 	keyV10 := linuxV10Key
 	var keyV11 []byte
 	if pw, err := keychainPasswordFn(); err == nil {

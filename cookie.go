@@ -9,7 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"runtime"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	// modernc.org/sqlite registers a pure-Go "sqlite" driver with database/sql.
@@ -24,16 +25,24 @@ import (
 var keychainPasswordFn = systemKeychainPassword
 
 // GetCookies returns every Slack authentication cookie known to the desktop
-// app's cookies database — the `d` cookie always, and `d-s` when present.
+// app's cookies database — the `d` cookie always, and `d-s` when present. The
+// cookies database is copied (through a pinned os.Root) into a private temp
+// directory and read from there, so a running Slack never blocks the read and
+// symlinks cannot redirect it.
 func GetCookies() ([]Cookie, error) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
-		return nil, ErrUnsupportedOS
-	}
-	path, err := slackCookiesPath()
+	root, err := openProfileRoot(materializeOpts{cookies: true})
 	if err != nil {
 		return nil, err
 	}
-	return readCookiesFrom(path)
+	defer func() { _ = root.Close() }()
+
+	tmp, cleanup, err := materialize(root, materializeOpts{cookies: true})
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	return readCookiesFrom(filepath.Join(tmp, "Cookies"), root)
 }
 
 // cookieDecrypter decrypts one row from the Chromium cookies table.
@@ -42,8 +51,13 @@ func GetCookies() ([]Cookie, error) {
 // DPAPI-wrapped value in Local State.
 type cookieDecrypter func(enc []byte, hostKey string, metaVersion int) (string, error)
 
-func readCookiesFrom(path string) ([]Cookie, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1", url.PathEscape(path))
+// readCookiesFrom reads the Cookies SQLite database at path (a private copy) and
+// decrypts the `d`/`d-s` rows. root is the pinned profile root, passed to the
+// platform decrypter (Windows reads its Local State key through it); other
+// platforms ignore it. The copy is opened read-only; immutable=1 is deliberately
+// NOT set so that a copied WAL/journal is replayed and recent cookies are seen.
+func readCookiesFrom(path string, root *os.Root) ([]Cookie, error) {
+	dsn := fmt.Sprintf("file:%s?mode=ro", url.PathEscape(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open cookies db: %w", err)
@@ -58,7 +72,7 @@ func readCookiesFrom(path string) ([]Cookie, error) {
 	rows, err := db.Query(
 		`SELECT host_key, name, encrypted_value
 		   FROM cookies
-		  WHERE host_key LIKE '%slack.com'
+		  WHERE (host_key LIKE '%slack.com' OR host_key LIKE '%slack-gov.com')
 		    AND name IN ('d','d-s')`,
 	)
 	if err != nil {
@@ -86,7 +100,7 @@ func readCookiesFrom(path string) ([]Cookie, error) {
 		return nil, ErrCookieNotFound
 	}
 
-	decrypt, err := newPlatformDecrypter()
+	decrypt, err := newPlatformDecrypter(root)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +113,7 @@ func readCookiesFrom(path string) ([]Cookie, error) {
 			lastErr = fmt.Errorf("decrypt %s: %w", r.name, err)
 			continue
 		}
-		out = append(out, Cookie{Name: r.name, Value: val})
+		out = append(out, Cookie{Name: r.name, Value: val, Host: r.host})
 	}
 	if len(out) == 0 {
 		if lastErr != nil {

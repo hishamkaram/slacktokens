@@ -9,6 +9,7 @@ package slacktokens
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -51,7 +52,7 @@ func systemKeychainPassword() (string, error) {
 // newPlatformDecrypter wires up the macOS cookie decrypt strategy:
 // Keychain password -> PBKDF2(1003 iters) -> AES-128-CBC.
 // Chromium on macOS only uses the v10 prefix, so keyV11 is left nil.
-func newPlatformDecrypter() (cookieDecrypter, error) {
+func newPlatformDecrypter(_ *os.Root) (cookieDecrypter, error) {
 	pw, err := keychainPasswordFn()
 	if err != nil {
 		return nil, err

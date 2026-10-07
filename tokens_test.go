@@ -4,6 +4,7 @@
 package slacktokens
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -81,31 +82,59 @@ func TestReadTokensFrom_BadJSON(t *testing.T) {
 	}
 }
 
-// Simulates Slack holding the LevelDB lock: a writer keeps the store open
-// while readTokensFrom is invoked. The transparent snapshot fallback should
-// kick in and return the staged data.
-func TestReadTokensFrom_SnapshotFallbackWhenLocked(t *testing.T) {
+// GetTokens materializes only the LevelDB store, so a profile with no Cookies
+// database (or an unstable one) must not break token extraction.
+func TestGetTokens_NoCookiesNeeded(t *testing.T) {
+	profile := t.TempDir()
+	t.Setenv(profileDirEnv, profile)
+	dbDir := filepath.Join(profile, "Local Storage", "leveldb")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 	json := `{"teams":{"T1":{"url":"https://a.slack.com","token":"xoxc-1","name":"A"}}}`
-	dir := stageLevelDB(t, append([]byte{0x01}, []byte(json)...))
+	stageLevelDBAt(t, dbDir, append([]byte{0x01}, []byte(json)...))
+	// Deliberately NO Cookies file in the profile.
 
-	// Reopen as writer to acquire the on-disk lock, mirroring a running Slack.
-	holder, err := leveldb.OpenFile(dir, nil)
+	got, err := GetTokens()
+	if err != nil {
+		t.Fatalf("GetTokens without a Cookies DB: %v", err)
+	}
+	if got["https://a.slack.com"].Token != "xoxc-1" {
+		t.Fatalf("unexpected data: %#v", got)
+	}
+}
+
+// Simulates Slack holding the LevelDB lock: a writer keeps the source store
+// open while GetTokens runs. Because reads go through a private copy, the lock
+// never blocks extraction.
+func TestGetTokens_CopesWithLockedSource(t *testing.T) {
+	profile := t.TempDir()
+	t.Setenv(profileDirEnv, profile)
+
+	dbDir := filepath.Join(profile, "Local Storage", "leveldb")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	json := `{"teams":{"T1":{"url":"https://a.slack.com","token":"xoxc-1","name":"A"}}}`
+	stageLevelDBAt(t, dbDir, append([]byte{0x01}, []byte(json)...))
+	// materialize also copies the Cookies DB; GetTokens never opens it, so a stub
+	// file is enough to let the copy succeed.
+	if err := os.WriteFile(filepath.Join(profile, "Cookies"), []byte("stub"), 0o600); err != nil {
+		t.Fatalf("stage cookies: %v", err)
+	}
+
+	// Reopen as writer to hold the on-disk lock, mirroring a running Slack.
+	holder, err := leveldb.OpenFile(dbDir, nil)
 	if err != nil {
 		t.Fatalf("acquire lock: %v", err)
 	}
 	defer func() { _ = holder.Close() }()
 
-	// Direct open should fail with ErrLocalStorageLocked.
-	if _, err := openAndExtractTokens(dir); err == nil {
-		t.Fatal("expected lock error from direct open while writer holds DB")
-	}
-
-	// readTokensFrom should transparently snapshot and succeed.
-	got, err := readTokensFrom(dir)
+	got, err := GetTokens()
 	if err != nil {
-		t.Fatalf("readTokensFrom with locked DB: %v", err)
+		t.Fatalf("GetTokens with locked source: %v", err)
 	}
 	if got["https://a.slack.com"].Token != "xoxc-1" {
-		t.Fatalf("snapshot read returned unexpected data: %#v", got)
+		t.Fatalf("unexpected data: %#v", got)
 	}
 }

@@ -178,7 +178,11 @@ func TestReadLocalStateMasterKey(t *testing.T) {
 		return masterKey, nil
 	}
 
-	got, err := readLocalStateMasterKey(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read Local State: %v", err)
+	}
+	got, err := readLocalStateMasterKey(data)
 	if err != nil {
 		t.Fatalf("readLocalStateMasterKey: %v", err)
 	}
@@ -198,7 +202,11 @@ func TestReadLocalStateMasterKey_MissingDPAPIPrefix(t *testing.T) {
 	if err := os.WriteFile(path, stateJSON, 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := readLocalStateMasterKey(path); err == nil {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read Local State: %v", err)
+	}
+	if _, err := readLocalStateMasterKey(data); err == nil {
 		t.Fatal("expected error for missing DPAPI prefix")
 	}
 }

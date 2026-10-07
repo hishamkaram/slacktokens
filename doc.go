@@ -11,9 +11,11 @@
 //
 // Supported platforms: macOS, Linux, and Windows.
 //
-// These functions work whether Slack is running or quit. If the LevelDB store
-// is locked by a running Slack, it is snapshot-copied to a temp directory and
-// read from the copy.
+// These functions work whether Slack is running or quit. The profile directory
+// is opened through a pinned os.Root (symlink-safe, escape-proof) and its
+// LevelDB store and Cookies database are copied into a private 0700 temp
+// directory, which the backends then open — so a running Slack's lock never
+// blocks the read and a swapped symlink cannot redirect it.
 //
 // Example:
 //
