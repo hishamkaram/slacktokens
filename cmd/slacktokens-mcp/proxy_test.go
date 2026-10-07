@@ -56,33 +56,85 @@ func TestAllowWriteFromEnv(t *testing.T) {
 	}
 }
 
-func TestValidateMethod(t *testing.T) {
+func TestAllowDestructiveFromEnv(t *testing.T) {
+	// Same strict exact-"1" rule as the write gate (fail closed).
 	cases := []struct {
-		name       string
-		method     string
-		allowWrite bool
-		wantErr    bool
+		val  string
+		want bool
 	}{
-		{"read allowed", "conversations.history", false, false},
-		{"read allowed when write on", "users.info", true, false},
-		{"write blocked by default", "chat.postMessage", false, true},
-		{"write allowed when gated", "chat.postMessage", true, false},
-		{"unknown method", "files.upload", true, true},
-		{"destructive excluded even when gated", "chat.delete", true, true},
-		{"admin excluded even when gated", "admin.users.remove", true, true},
-		{"chat.update excluded (overwrites)", "chat.update", true, true},
-		{"path traversal slash", "../oauth/token", true, true},
-		{"path traversal dotdot", "conversations..history", true, true},
-		{"well-formed but not allowlisted", "conversations.create", true, true},
-		{"single segment rejected", "auth", true, true},
-		{"empty rejected", "", true, true},
-		{"trailing slash rejected", "auth.test/", true, true},
+		{"", false}, {"0", false}, {"false", false}, {"no", false},
+		{"true", false}, {"TRUE", false}, {"Yes", false}, {"on", false},
+		{" 1 ", false}, {"1\n", false}, {"1", true},
+	}
+	for _, c := range cases {
+		t.Run("val="+c.val, func(t *testing.T) {
+			t.Setenv(allowDestructiveEnv, c.val)
+			if got := allowDestructiveFromEnv(); got != c.want {
+				t.Errorf("allowDestructiveFromEnv() with %q = %v, want %v", c.val, got, c.want)
+			}
+		})
+	}
+}
+
+// TestProxyAnnotations_DestructiveHintHonesty: the hint must be true only when
+// the tool can actually run a destructive method (both gates), so a
+// destructive-only config does not overstate capability.
+func TestProxyAnnotations_DestructiveHintHonesty(t *testing.T) {
+	cases := []struct {
+		name             string
+		allowWrite       bool
+		allowDestructive bool
+		wantHint         bool
+	}{
+		{"no gates", false, false, false},
+		{"write only", true, false, false},
+		{"destructive only", false, true, false},
+		{"both gates", true, true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateMethod(c.method, c.allowWrite)
+			ann := proxyAnnotations("t", c.allowWrite && c.allowDestructive)
+			if ann.DestructiveHint == nil || *ann.DestructiveHint != c.wantHint {
+				t.Errorf("DestructiveHint = %v, want %v", ann.DestructiveHint, c.wantHint)
+			}
+		})
+	}
+}
+
+func TestValidateMethod(t *testing.T) {
+	cases := []struct {
+		name             string
+		method           string
+		allowWrite       bool
+		allowDestructive bool
+		wantErr          bool
+	}{
+		{"read allowed", "conversations.history", false, false, false},
+		{"read allowed when write on", "users.info", true, false, false},
+		{"write blocked by default", "chat.postMessage", false, false, true},
+		{"write allowed when gated", "chat.postMessage", true, false, false},
+		{"conversations.open allowed when write gated", "conversations.open", true, false, false},
+		{"conversations.open blocked by default", "conversations.open", false, false, true},
+		{"unknown method", "files.upload", true, true, true},
+		{"destructive blocked by default", "chat.delete", false, false, true},
+		{"destructive blocked with write only", "chat.delete", true, false, true},
+		{"destructive blocked with destructive only", "chat.delete", false, true, true},
+		{"destructive allowed with both gates", "chat.delete", true, true, false},
+		{"chat.update allowed with both gates", "chat.update", true, true, false},
+		{"chat.update blocked with write only", "chat.update", true, false, true},
+		{"admin excluded even when gated", "admin.users.remove", true, true, true},
+		{"path traversal slash", "../oauth/token", true, true, true},
+		{"path traversal dotdot", "conversations..history", true, true, true},
+		{"well-formed but not allowlisted", "conversations.create", true, true, true},
+		{"single segment rejected", "auth", true, true, true},
+		{"empty rejected", "", true, true, true},
+		{"trailing slash rejected", "auth.test/", true, true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateMethod(c.method, c.allowWrite, c.allowDestructive)
 			if (err != nil) != c.wantErr {
-				t.Errorf("validateMethod(%q, %v) err = %v, wantErr %v", c.method, c.allowWrite, err, c.wantErr)
+				t.Errorf("validateMethod(%q, w=%v, d=%v) err = %v, wantErr %v", c.method, c.allowWrite, c.allowDestructive, err, c.wantErr)
 			}
 		})
 	}
@@ -736,9 +788,9 @@ func TestSlackAPICall_WorkspaceOmittedSingleWorkspace(t *testing.T) {
 	}
 }
 
-func TestSlackAPICall_CannotDeleteEvenWhenGated(t *testing.T) {
-	// Bypass guard: chat.delete is not on any allowlist, so the generic tool
-	// rejects it regardless of the write gate — there is no deletion tool at all.
+func TestSlackAPICall_DeleteBlockedWithoutDestructiveGate(t *testing.T) {
+	// With only the write gate open, chat.delete must be rejected before any
+	// network call — the destructive gate is a required second key.
 	var hit bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hit = true
@@ -746,7 +798,7 @@ func TestSlackAPICall_CannotDeleteEvenWhenGated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := newProxyHandler(t, true, srv) // allowWrite=true
+	h := newProxyHandler(t, true, srv) // allowWrite=true, allowDestructive=false
 	res, _, err := h.slackAPICall(context.Background(), nil, slackAPIInput{
 		Workspace: "https://acme.slack.com",
 		Method:    "chat.delete",
@@ -756,10 +808,39 @@ func TestSlackAPICall_CannotDeleteEvenWhenGated(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	if res == nil || !res.IsError {
-		t.Fatal("slack_api_call must reject chat.delete")
+		t.Fatal("slack_api_call must reject chat.delete without the destructive gate")
 	}
 	if hit {
-		t.Fatal("chat.delete via slack_api_call must not reach the network")
+		t.Fatal("chat.delete must not reach the network when the gate is closed")
+	}
+}
+
+func TestSlackAPICall_DeleteAllowedWithBothGates(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	h := newProxyHandler(t, true, srv)
+	h.cfg.allowDestructive = true // second key
+	res, out, err := h.slackAPICall(context.Background(), nil, slackAPIInput{
+		Workspace: "https://acme.slack.com",
+		Method:    "chat.delete",
+		Params:    map[string]any{"channel": "C1", "ts": "1401383885.000061"},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if res != nil && res.IsError {
+		t.Fatalf("unexpected IsError: %+v", res.Content)
+	}
+	if gotPath != "/api/chat.delete" {
+		t.Errorf("path = %q, want /api/chat.delete", gotPath)
+	}
+	if !out.OK {
+		t.Errorf("out.OK = false: %+v", out)
 	}
 }
 
@@ -781,7 +862,7 @@ func TestSlackAPICall_EndToEndViaMCP(t *testing.T) {
 	})
 	mcp.AddTool(mcpSrv, &mcp.Tool{
 		Name:        "slack_api_call",
-		Annotations: proxyAnnotations("proxy"),
+		Annotations: proxyAnnotations("proxy", false),
 	}, h.slackAPICall)
 
 	srvT, cliT := mcp.NewInMemoryTransports()

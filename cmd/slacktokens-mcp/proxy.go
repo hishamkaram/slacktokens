@@ -40,6 +40,12 @@ const (
 	// keeps the proxy read-only.
 	allowWriteEnv = "SLACKTOKENS_MCP_ALLOW_WRITE"
 
+	// allowDestructiveEnv opts in to the DESTRUCTIVE method set (chat.delete,
+	// chat.update). It is a SECOND key: destructive methods run only when BOTH
+	// allowWriteEnv AND allowDestructiveEnv are set. Unset (default) keeps
+	// deletion/overwrite unavailable even with writes enabled.
+	allowDestructiveEnv = "SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE"
+
 	// slackAPIBaseURL is the canonical Web API host. xoxc+d authenticates here.
 	slackAPIBaseURL = "https://slack.com/api/"
 
@@ -67,14 +73,23 @@ var readMethods = map[string]bool{
 }
 
 // writeMethods are allowed ONLY when SLACKTOKENS_MCP_ALLOW_WRITE is set. The
-// set is deliberately small and ADDITIVE — no method here overwrites or removes
-// existing content (chat.update is intentionally excluded because it rewrites a
-// message), so DestructiveHint=false stays honest and a confused-deputy call
-// cannot destroy state even with the gate open.
+// set is ADDITIVE — nothing here overwrites or removes existing content:
+// conversations.open just opens/returns a DM or group DM channel. Overwriting or
+// deleting lives in destructiveMethods behind the second gate.
 var writeMethods = map[string]bool{
 	"chat.postMessage":   true,
 	"reactions.add":      true,
 	"conversations.mark": true,
+	"conversations.open": true,
+}
+
+// destructiveMethods require BOTH SLACKTOKENS_MCP_ALLOW_WRITE and
+// SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE. chat.delete removes a message (irreversible,
+// and with an admin account can remove other users' messages); chat.update
+// overwrites one. Separated so the common write gate stays non-destructive.
+var destructiveMethods = map[string]bool{
+	"chat.delete": true,
+	"chat.update": true,
 }
 
 // methodPattern constrains a method to Slack's dotted shape (segments are
@@ -89,6 +104,13 @@ var methodPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z
 // enabling remote writes is always an explicit, unambiguous choice.
 func allowWriteFromEnv() bool {
 	return os.Getenv(allowWriteEnv) == "1"
+}
+
+// allowDestructiveFromEnv reports whether the operator opted in to destructive
+// methods. Exact-"1" like the write gate (fail closed on anything else); only
+// meaningful together with allowWriteFromEnv (the two-key gate).
+func allowDestructiveFromEnv() bool {
+	return os.Getenv(allowDestructiveEnv) == "1"
 }
 
 // slackAPIInput is the tool's input.
@@ -163,7 +185,7 @@ func hostOf(workspaceURL string) string {
 }
 
 // validateMethod enforces the shape + allowlist, fail-closed.
-func validateMethod(method string, allowWrite bool) error {
+func validateMethod(method string, allowWrite, allowDestructive bool) error {
 	if !methodPattern.MatchString(method) {
 		return fmt.Errorf("invalid Slack method name %q", method)
 	}
@@ -176,7 +198,13 @@ func validateMethod(method string, allowWrite bool) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("method %q is not on the allowlist (read methods are always available; write methods require %s=1)", method, allowWriteEnv)
+	if destructiveMethods[method] {
+		if !allowWrite || !allowDestructive {
+			return fmt.Errorf("method %q is a destructive method; it is disabled — set BOTH %s=1 and %s=1 to enable it", method, allowWriteEnv, allowDestructiveEnv)
+		}
+		return nil
+	}
+	return fmt.Errorf("method %q is not on the allowlist (reads are always available; writes require %s=1; destructive methods require %s=1 too)", method, allowWriteEnv, allowDestructiveEnv)
 }
 
 // encodeParams flattens params into a urlencoded form body. Scalars become
@@ -459,10 +487,11 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 }
 
 // slackAPICall is the generic proxy tool handler. It enforces the fail-closed
-// method allowlist, then delegates the transport to call. chat.delete is not on
-// any allowlist, so this tool can never delete.
+// method allowlist, then delegates the transport to call. Destructive methods
+// (chat.delete/chat.update) run only when both the write and destructive gates
+// are set; otherwise they are rejected before any network call.
 func (h *handlers) slackAPICall(ctx context.Context, _ *mcp.CallToolRequest, in slackAPIInput) (*mcp.CallToolResult, slackAPIOutput, error) {
-	if err := validateMethod(in.Method, h.cfg.allowWrite); err != nil {
+	if err := validateMethod(in.Method, h.cfg.allowWrite, h.cfg.allowDestructive); err != nil {
 		return errorResult(err), slackAPIOutput{}, nil
 	}
 	res, out := h.call(ctx, in.Workspace, in.Method, in.Params)
