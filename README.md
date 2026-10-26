@@ -1,5 +1,7 @@
 # slacktokens
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hishamkaram/slacktokens/badge)](https://scorecard.dev/viewer/?uri=github.com%2Fhishamkaram%2Fslacktokens)
+
 Extract personal Slack workspace tokens (`xoxc-...`) and the authentication cookies (`d`, `d-s`) from the Slack desktop app's local storage.
 
 Copyright (C) 2026 Hesham Karm. Released under [GPL-3.0-or-later](./LICENSE).
