@@ -260,6 +260,10 @@ Live integration is opt-in: it reads your real tokens and triggers the OS keycha
 
 ## Development
 
+Use Go 1.27.3 or newer, as required by `go.mod`, to include the October 2026
+standard-library security fixes. After upgrading Go, rebuild or reinstall both
+CLIs: existing binaries keep the standard library they were compiled with.
+
 Install the toolchain and the git hooks.
 
 macOS:
@@ -274,7 +278,7 @@ Linux:
 
 ```sh
 # golangci-lint
-curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.11.3
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.14.0
 # lefthook
 go install github.com/evilmartians/lefthook@latest
 go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -285,7 +289,7 @@ Windows (PowerShell):
 
 ```powershell
 # golangci-lint
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.3
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 # lefthook
 go install github.com/evilmartians/lefthook@latest
 go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -297,7 +301,7 @@ Hooks:
 - **pre-commit** runs `gofmt -l`, `go vet`, and `golangci-lint`.
 - **pre-push** runs `go test -race` and `govulncheck`.
 
-CI mirrors these checks plus a `gosec` job, plus a `lint` matrix across Linux/macOS/Windows targets, plus a `test` matrix of 2 Go versions × 3 OSes.
+CI mirrors these checks plus a `gosec` job, a `lint` matrix across Linux/macOS/Windows targets, and native tests on all three OSes using the Go version in `go.mod`. Releases scan all six supported OS/architecture combinations before building.
 
 ## License
 

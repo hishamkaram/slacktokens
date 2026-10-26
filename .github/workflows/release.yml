@@ -18,8 +18,17 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: true
+
+      - name: Check vulnerabilities before release
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          for target in linux darwin windows; do
+            for arch in amd64 arm64; do
+              GOOS="$target" GOARCH="$arch" CGO_ENABLED=0 govulncheck ./...
+            done
+          done
 
       - uses: goreleaser/goreleaser-action@v7
         with:
