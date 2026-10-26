@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   test:
     strategy:
@@ -17,8 +20,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -39,39 +44,55 @@ jobs:
     env:
       GOOS: ${{ matrix.goos }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
           cache: true
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0
 
   vuln:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           # Scan the same toolchain used for release builds. An outdated
           # standard library is a real exposure, not a scanner false positive.
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            .github/tools/go.sum
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOBIN="$RUNNER_TEMP/security-tools" go -C .github/tools install golang.org/x/vuln/cmd/govulncheck
+          export PATH="$RUNNER_TEMP/security-tools:$PATH"
           govulncheck ./...
 
   gosec:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - name: gosec
-        uses: securego/gosec@master
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            .github/tools/go.sum
+      - name: gosec
+        run: |
+          GOBIN="$RUNNER_TEMP/security-tools" go -C .github/tools install github.com/securego/gosec/v2/cmd/gosec
           # G505 (crypto/sha1): Chromium's PBKDF2 mandates SHA-1; this is
           # interop, not our crypto choice. The decrypt path uses a fixed
           # IV (G407) by Chromium specification; the encrypt-with-fixed-IV
           # helper lives only in _test.go and gosec doesn't scan tests.
-          args: -exclude=G505 ./...
+          "$RUNNER_TEMP/security-tools/gosec" -exclude=G505 ./...

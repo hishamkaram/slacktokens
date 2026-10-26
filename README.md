@@ -4,6 +4,8 @@ Extract personal Slack workspace tokens (`xoxc-...`) and the authentication cook
 
 Copyright (C) 2026 Hesham Karm. Released under [GPL-3.0-or-later](./LICENSE).
 
+Report vulnerabilities through the private reporting link in [SECURITY.md](./SECURITY.md).
+
 This is a Go port of [hraftery/slacktokens](https://github.com/hraftery/slacktokens) — the original Python implementation by Heath Raftery (2021). The port matches the upstream public surface, ships a CLI, and adds verified-against-current-Chromium crypto plus the test suite the original lacks. Per GPLv3, the upstream copyright is preserved and this port is also distributed under GPLv3.
 
 > Not endorsed or authorised by Slack Technologies LLC.
@@ -270,7 +272,7 @@ macOS:
 
 ```sh
 brew install lefthook golangci-lint
-go install golang.org/x/vuln/cmd/govulncheck@latest
+go -C .github/tools install golang.org/x/vuln/cmd/govulncheck
 lefthook install
 ```
 
@@ -281,7 +283,7 @@ Linux:
 curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.14.0
 # lefthook
 go install github.com/evilmartians/lefthook@latest
-go install golang.org/x/vuln/cmd/govulncheck@latest
+go -C .github/tools install golang.org/x/vuln/cmd/govulncheck
 lefthook install
 ```
 
@@ -292,7 +294,7 @@ Windows (PowerShell):
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 # lefthook
 go install github.com/evilmartians/lefthook@latest
-go install golang.org/x/vuln/cmd/govulncheck@latest
+go -C .github/tools install golang.org/x/vuln/cmd/govulncheck
 lefthook install
 ```
 
@@ -302,6 +304,13 @@ Hooks:
 - **pre-push** runs `go test -race` and `govulncheck`.
 
 CI mirrors these checks plus a `gosec` job, a `lint` matrix across Linux/macOS/Windows targets, and native tests on all three OSes using the Go version in `go.mod`. Releases scan all six supported OS/architecture combinations before building.
+
+CI and release scanners are pinned in a separate [tools module](./.github/tools/go.mod).
+Dependabot opens weekly Go and GitHub Actions update PRs and advisory-driven
+security fixes; merges remain manual. Dependency review and CodeQL gate new
+high/critical findings, and daily scans check all six release targets. See the
+[security policy](./SECURITY.md) for reporting and supported versions, and the
+[security administration guide](./.github/security/README.md) for repository rules.
 
 ## License
 
