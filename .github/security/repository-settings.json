@@ -1,0 +1,31 @@
+[
+  {
+    "method": "PUT",
+    "path": "repos/hishamkaram/slacktokens/vulnerability-alerts"
+  },
+  {
+    "method": "PUT",
+    "path": "repos/hishamkaram/slacktokens/automated-security-fixes"
+  },
+  {
+    "method": "PUT",
+    "path": "repos/hishamkaram/slacktokens/private-vulnerability-reporting"
+  },
+  {
+    "method": "PATCH",
+    "path": "repos/hishamkaram/slacktokens",
+    "body": {
+      "allow_auto_merge": false,
+      "delete_branch_on_merge": true
+    }
+  },
+  {
+    "method": "PUT",
+    "path": "repos/hishamkaram/slacktokens/actions/permissions",
+    "body": {
+      "enabled": true,
+      "allowed_actions": "all",
+      "sha_pinning_required": true
+    }
+  }
+]

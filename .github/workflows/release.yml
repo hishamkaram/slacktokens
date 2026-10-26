@@ -6,33 +6,41 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-          cache: true
+          # Do not restore build/dependency caches into a publishing job.
+          cache: false
 
       - name: Check vulnerabilities before release
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOBIN="$RUNNER_TEMP/security-tools" go -C .github/tools install golang.org/x/vuln/cmd/govulncheck
+          export PATH="$RUNNER_TEMP/security-tools:$PATH"
           for target in linux darwin windows; do
             for arch in amd64 arm64; do
               GOOS="$target" GOARCH="$arch" CGO_ENABLED=0 govulncheck ./...
             done
           done
 
-      - uses: goreleaser/goreleaser-action@v7
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: "~> v2"
+          version: v2.19.0
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
