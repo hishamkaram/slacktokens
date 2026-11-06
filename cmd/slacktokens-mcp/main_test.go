@@ -56,10 +56,9 @@ func TestInitialize_AdvertisesNoLoggingNoResources(t *testing.T) {
 	}
 }
 
-// TestListTools_OnlyProxyNoCredentialTools is the security contract: the server
-// exposes ONLY slack_api_call (which keeps credentials server-side) and no tool
-// that returns or writes raw credentials.
-func TestListTools_OnlyProxyNoCredentialTools(t *testing.T) {
+// TestListTools_OnlyCredentialSafeTools is the security contract: exposed tools
+// keep credentials server-side and none returns or writes raw credentials.
+func TestListTools_OnlyCredentialSafeTools(t *testing.T) {
 	cs := connect(t)
 	list, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
@@ -70,8 +69,8 @@ func TestListTools_OnlyProxyNoCredentialTools(t *testing.T) {
 		got = append(got, tt.Name)
 	}
 	sort.Strings(got)
-	if !sliceEqual(got, []string{"slack_api_call"}) {
-		t.Fatalf("tool list must be exactly [slack_api_call], got %v", got)
+	if !sliceEqual(got, []string{"slack_api_call", "slack_file_upload"}) {
+		t.Fatalf("unexpected tool list: %v", got)
 	}
 
 	// Regression guard: none of the credential-exposing tools may ever return.
@@ -87,6 +86,18 @@ func TestListTools_OnlyProxyNoCredentialTools(t *testing.T) {
 	}
 
 	for _, tt := range list.Tools {
+		if tt.Name == "slack_file_upload" {
+			if tt.Annotations == nil || tt.InputSchema == nil || tt.OutputSchema == nil || tt.Description == "" {
+				t.Errorf("slack_file_upload: incomplete tool definition")
+			}
+			if tt.Annotations.OpenWorldHint == nil || !*tt.Annotations.OpenWorldHint {
+				t.Errorf("slack_file_upload: OpenWorldHint must be true")
+			}
+			if tt.Annotations.ReadOnlyHint {
+				t.Errorf("slack_file_upload: ReadOnlyHint must be false")
+			}
+			continue
+		}
 		if tt.Name != "slack_api_call" {
 			continue
 		}
@@ -105,9 +116,9 @@ func TestListTools_OnlyProxyNoCredentialTools(t *testing.T) {
 	}
 }
 
-// TestListTools_WriteGateAddsNoCredentialTool verifies that enabling the write
-// gate still exposes only slack_api_call (no separate delete tool anymore).
-func TestListTools_WriteGateAddsNoCredentialTool(t *testing.T) {
+// TestListTools_WriteGateKeepsCredentialSafeTools verifies the write gate
+// exposes no credential retrieval tool.
+func TestListTools_WriteGateKeepsCredentialSafeTools(t *testing.T) {
 	t.Setenv("SLACKTOKENS_MCP_ALLOW_WRITE", "1")
 	t.Setenv("SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE", "1")
 	cs := connect(t)
@@ -115,12 +126,12 @@ func TestListTools_WriteGateAddsNoCredentialTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(list.Tools) != 1 || list.Tools[0].Name != "slack_api_call" {
+	if len(list.Tools) != 2 {
 		names := make([]string, len(list.Tools))
 		for i, tt := range list.Tools {
 			names[i] = tt.Name
 		}
-		t.Fatalf("even with both gates, only slack_api_call should exist; got %v", names)
+		t.Fatalf("unexpected tools with writes enabled: %v", names)
 	}
 }
 

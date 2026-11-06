@@ -16,11 +16,11 @@
 //     `notifications/message`. Diagnostic logs go to stderr only.
 //
 // SECURITY: a Slack token or auth cookie is a live credential. This server
-// exposes exactly ONE tool, slack_api_call: a credential-broker proxy. It
-// injects the live credentials server-side, calls slack.com, and returns the
-// (redacted) response — so the credential never enters the model context. It is
-// fail-closed: only allowlisted methods run, and write methods require
-// SLACKTOKENS_MCP_ALLOW_WRITE=1. See proxy.go.
+// exposes credential-safe tools: slack_api_call is a fail-closed proxy for
+// allowlisted methods, and slack_file_upload keeps the temporary upload URL
+// inside the server. Both inject live credentials server-side; write
+// operations require SLACKTOKENS_MCP_ALLOW_WRITE=1. See proxy.go and
+// file_upload.go.
 //
 // There is deliberately NO tool that returns or writes raw credentials: a file
 // written as the current user (even mode 0600) is readable by any host tool
@@ -52,13 +52,16 @@ var version = "dev"
 
 // mcpConfig holds runtime configuration resolved once at startup.
 type mcpConfig struct {
-	// allowWrite, when true, lets the slack_api_call proxy invoke the curated
-	// WRITE method set. Sourced from SLACKTOKENS_MCP_ALLOW_WRITE; default false.
+	// allowWrite, when true, enables the curated WRITE methods and file uploads.
+	// Sourced from SLACKTOKENS_MCP_ALLOW_WRITE; default false.
 	allowWrite bool
 	// allowDestructive, when true AND allowWrite is also true, additionally lets
 	// the proxy invoke the DESTRUCTIVE method set (chat.delete, chat.update).
 	// Sourced from SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE; default false (two-key gate).
 	allowDestructive bool
+	// uploadRoot limits files the slack_file_upload tool can read. Sourced from
+	// SLACKTOKENS_MCP_UPLOAD_ROOT; an empty value disables local file access.
+	uploadRoot string
 }
 
 // handlers carries the dependencies shared by every tool handler.
@@ -110,7 +113,11 @@ func proxyAnnotations(title string, destructive bool) *mcp.ToolAnnotations {
 // newServer builds the MCP server with configuration resolved from the
 // environment. Use newServerWithConfig in tests to drive a specific config.
 func newServer() *mcp.Server {
-	return newServerWithConfig(mcpConfig{allowWrite: allowWriteFromEnv(), allowDestructive: allowDestructiveFromEnv()})
+	return newServerWithConfig(mcpConfig{
+		allowWrite:       allowWriteFromEnv(),
+		allowDestructive: allowDestructiveFromEnv(),
+		uploadRoot:       os.Getenv(uploadRootEnv),
+	})
 }
 
 // newServerWithConfig builds the MCP server for a specific config.
@@ -138,6 +145,14 @@ func newServerWithConfig(cfg mcpConfig) *mcp.Server {
 		Annotations: proxyAnnotations("Call the Slack Web API via credential proxy", cfg.allowWrite && cfg.allowDestructive),
 	}, h.slackAPICall)
 
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "slack_file_upload",
+		Title:       "Upload and share a local file in Slack",
+		Description: fileUploadToolDescription(cfg),
+		InputSchema: fileUploadInputSchema(),
+		Annotations: proxyAnnotations("Upload and share a local file in Slack", false),
+	}, h.slackFileUpload)
+
 	return server
 }
 
@@ -161,7 +176,11 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := newServerWithConfig(mcpConfig{allowWrite: allowWriteFromEnv(), allowDestructive: allowDestructiveFromEnv()})
+	server := newServerWithConfig(mcpConfig{
+		allowWrite:       allowWriteFromEnv(),
+		allowDestructive: allowDestructiveFromEnv(),
+		uploadRoot:       os.Getenv(uploadRootEnv),
+	})
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 		return err
