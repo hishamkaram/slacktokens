@@ -143,7 +143,7 @@ go install github.com/hishamkaram/slacktokens/cmd/slacktokens-mcp@latest
 
 ### Secure by default — credentials never enter the AI's context
 
-A Slack token or auth cookie is a live credential. Returning one in a tool result would drop it into the calling model's context window, its transcript, and any provider-side logs — a sensitive-information-disclosure risk. So the MCP server exposes **exactly one tool**, `slack_api_call`, and it **never hands a credential to the AI**: it injects the `xoxc` token + `d` cookie server-side, calls `slack.com`, and returns only the (redacted) response.
+A Slack token or auth cookie is a live credential. Returning one in a tool result would drop it into the calling model's context window, its transcript, and any provider-side logs — a sensitive-information-disclosure risk. The MCP server exposes `slack_api_call` and `slack_file_upload`; neither hands a credential to the AI. The API proxy injects the `xoxc` token + `d` cookie server-side and returns only the redacted response. The upload tool keeps Slack's temporary upload URL inside the server.
 
 There is deliberately **no tool that returns or writes raw credentials**. A file written as your OS user — even mode `0600` — is readable by any tool the agent can already run as you, so it would not be a real barrier. When *you* (a human) want the credentials in a file, run the CLI yourself:
 
@@ -156,6 +156,7 @@ Tools:
 | Name | Returns |
 | --- | --- |
 | `slack_api_call` | result of a Slack Web API call made with injected credentials (credential-broker proxy) |
+| `slack_file_upload` | confirmation and Slack file ID after uploading a local file and sharing it to a channel |
 
 `slack_api_call` advertises `openWorldHint: true` (it reaches the network), `readOnlyHint: false` (it can call write methods when enabled), and `destructiveHint` that tracks the destructive gate (`true` only when both the write and destructive gates are open, otherwise `false`). The server opts out of the `logging` capability so secrets cannot leak via `notifications/message`.
 
@@ -169,6 +170,7 @@ It is **fail-closed**:
 
 - Only methods on a curated allowlist run. Reads (`auth.test`, `conversations.history`, `users.info`, `search.messages`, …) are always available.
 - Write methods (`chat.postMessage`, `reactions.add`, `conversations.mark`, `conversations.open`) run **only** when the server is started with `SLACKTOKENS_MCP_ALLOW_WRITE=1` (exactly `1`). These are additive — nothing that overwrites or deletes.
+- `slack_file_upload` uses the same write gate. It reads only relative paths inside `SLACKTOKENS_MCP_UPLOAD_ROOT`, requires a channel ID, and rejects files larger than 1 GiB. The temporary upload URL is validated against Slack's upload host, used for a raw-byte POST without Slack credentials, and never returned to the AI.
 - Destructive methods (`chat.delete`, `chat.update`) require a **second key**: **both** `SLACKTOKENS_MCP_ALLOW_WRITE=1` **and** `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE=1`. When the destructive gate is open the tool advertises `destructiveHint: true`. `admin.*`, `conversations.archive`, etc. remain unexposed.
 - Redirects are never followed (Go would otherwise re-send the `Authorization`/`Cookie` headers to the redirect target — a header-leak/SSRF risk). The API host is derived from the workspace URL: `*.slack-gov.com` workspaces hit the GovSlack API host, everything else `slack.com`.
 - A caller-supplied `token` argument is stripped before the request, so the server-injected credential is always authoritative and cannot be shadowed.
@@ -187,9 +189,10 @@ Register the server with the [`claude mcp add`](https://docs.claude.com/en/docs/
 # Read-only (allowlisted read methods; the safe default)
 claude mcp add slacktokens -s user -- slacktokens-mcp
 
-# Read + additive writes (chat.postMessage, reactions.add, conversations.mark)
+# Read + additive writes and local file upload
 claude mcp add slacktokens -s user \
   -e SLACKTOKENS_MCP_ALLOW_WRITE=1 \
+  -e SLACKTOKENS_MCP_UPLOAD_ROOT=/path/to/files \
   -- slacktokens-mcp
 ```
 
@@ -202,6 +205,7 @@ claude mcp add slacktokens -s user \
 claude mcp remove slacktokens -s user
 claude mcp add slacktokens -s user \
   -e SLACKTOKENS_MCP_ALLOW_WRITE=1 \
+  -e SLACKTOKENS_MCP_UPLOAD_ROOT=/path/to/files \
   -- slacktokens-mcp
 ```
 
@@ -217,7 +221,8 @@ Edit the config file — macOS: `~/Library/Application Support/Claude/claude_des
     "slacktokens": {
       "command": "slacktokens-mcp",
       "env": {
-        "SLACKTOKENS_MCP_ALLOW_WRITE": "1"
+        "SLACKTOKENS_MCP_ALLOW_WRITE": "1",
+        "SLACKTOKENS_MCP_UPLOAD_ROOT": "/path/to/files"
       }
     }
   }
@@ -230,8 +235,9 @@ Omit the `env` block for read-only. Use the binary's absolute path for `command`
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `SLACKTOKENS_MCP_ALLOW_WRITE` | unset | Enables the additive write methods on `slack_api_call` (`chat.postMessage`, `reactions.add`, `conversations.mark`, `conversations.open`). |
+| `SLACKTOKENS_MCP_ALLOW_WRITE` | unset | Enables the additive write methods on `slack_api_call` and the `slack_file_upload` tool. |
 | `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE` | unset | **Together with** `SLACKTOKENS_MCP_ALLOW_WRITE`, enables destructive methods (`chat.delete`, `chat.update`) on `slack_api_call`. Both keys required. |
+| `SLACKTOKENS_MCP_UPLOAD_ROOT` | unset | Limits `slack_file_upload` to relative paths under this directory. Required for file uploads. |
 | `SLACKTOKENS_PROFILE_DIR` | unset | Overrides Slack profile-directory discovery (trusted/test-only: opened directly). |
 
 Both gates are enabled only when their value is **exactly `1`** — any other value, including padded strings such as `" 1 "`, leaves them disabled (fail-closed).

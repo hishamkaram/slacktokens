@@ -148,6 +148,8 @@ func TestValidateMethod(t *testing.T) {
 		{"conversations.open allowed when write gated", "conversations.open", true, false, false},
 		{"conversations.open blocked by default", "conversations.open", false, false, true},
 		{"unknown method", "files.upload", true, true, true},
+		{"upload ticket stays private", "files.getUploadURLExternal", true, true, true},
+		{"upload completion is tool-only", "files.completeUploadExternal", true, true, true},
 		{"destructive blocked by default", "chat.delete", false, false, true},
 		{"destructive blocked with write only", "chat.delete", true, false, true},
 		{"destructive blocked with destructive only", "chat.delete", false, true, true},
