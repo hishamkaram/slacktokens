@@ -1,6 +1,6 @@
 module github.com/hishamkaram/slacktokens
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/godbus/dbus/v5 v5.2.2
