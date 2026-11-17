@@ -45,7 +45,17 @@ func TestInitialize_AdvertisesNoLoggingNoResources(t *testing.T) {
 	if res.Capabilities.Tools == nil {
 		t.Error("tools capability not advertised")
 	}
-	if res.Capabilities.Logging != nil {
+	// Check the wire form: ServerCapabilities.Logging is deprecated in the SDK,
+	// but a client still reads a "logging" key from the initialize result.
+	rawCaps, err := json.Marshal(res.Capabilities)
+	if err != nil {
+		t.Fatalf("marshal capabilities: %v", err)
+	}
+	var caps map[string]json.RawMessage
+	if err := json.Unmarshal(rawCaps, &caps); err != nil {
+		t.Fatalf("unmarshal capabilities: %v", err)
+	}
+	if _, ok := caps["logging"]; ok {
 		t.Error("logging capability MUST NOT be advertised — would risk secret leakage")
 	}
 	if res.Capabilities.Resources != nil {
