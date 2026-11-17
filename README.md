@@ -264,8 +264,8 @@ Live integration is opt-in: it reads your real tokens and triggers the OS keycha
 
 ## Development
 
-Use Go 1.27.3 or newer, as required by `go.mod`, to include the October 2026
-standard-library security fixes. After upgrading Go, rebuild or reinstall both
+Use Go 1.27.4 or newer, as required by `go.mod`, to include the latest
+standard-library security fixes (including GO-2026-6859 in `net/http`). After upgrading Go, rebuild or reinstall both
 CLIs: existing binaries keep the standard library they were compiled with.
 
 Install the toolchain and the git hooks.
