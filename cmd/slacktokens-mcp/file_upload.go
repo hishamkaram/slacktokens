@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,8 +27,12 @@ const (
 	slackFileUploadURL  = "files.getUploadURLExternal"
 	slackFileComplete   = "files.completeUploadExternal"
 	maxUploadBytes      = int64(1 << 30)
-	slackUploadTimeout  = 10 * time.Minute
 	maxUploadErrorBytes = 4096
+	// uploadBaseTimeout plus size/minUploadBytesPerSecond bounds one file
+	// transfer, so a large file on a slow link is not cut off by a fixed limit
+	// while a stalled transfer still ends.
+	uploadBaseTimeout       = 2 * time.Minute
+	minUploadBytesPerSecond = int64(512 << 10)
 )
 
 type slackFileUploadInput struct {
@@ -78,7 +83,7 @@ func fileUploadToolDescription(cfg mcpConfig) string {
 	b.WriteString("=1 to enable file uploads. ")
 	if cfg.uploadRoot == "" {
 		b.WriteString(uploadRootEnv)
-		b.WriteString(" is not configured, so uploads will fail until it points to an existing directory.")
+		b.WriteString(" is not configured, so uploads will fail until it is set to an existing absolute directory path.")
 	} else {
 		b.WriteString("Files larger than 1 GiB are rejected.")
 	}
@@ -110,11 +115,12 @@ func (h *handlers) slackFileUpload(ctx context.Context, _ *mcp.CallToolRequest, 
 		return errorResult(errors.New("thread_ts contains invalid characters")), slackFileUploadOutput{}, nil
 	}
 
-	f, filename, size, closeFile, err := h.openUploadFile(in.RelativePath)
+	f, size, err := h.openUploadFile(in.RelativePath)
 	if err != nil {
 		return errorResult(err), slackFileUploadOutput{}, nil
 	}
-	defer closeFile()
+	defer func() { _ = f.Close() }()
+	filename := path.Base(in.RelativePath)
 
 	title := in.Title
 	if title == "" {
@@ -167,43 +173,63 @@ func (h *handlers) slackFileUpload(ctx context.Context, _ *mcp.CallToolRequest, 
 	}, nil
 }
 
-func (h *handlers) openUploadFile(relativePath string) (*os.File, string, int64, func(), error) {
+// openUploadFile opens relativePath inside the configured upload root and
+// checks that it can be uploaded. The caller must close the returned file.
+// os.Root confines resolution, including symlinks, to the root. The root handle
+// is closed before returning; the opened file does not depend on it.
+func (h *handlers) openUploadFile(relativePath string) (*os.File, int64, error) {
 	if !fs.ValidPath(relativePath) || strings.Contains(relativePath, `\`) || filepath.IsAbs(filepath.FromSlash(relativePath)) || filepath.VolumeName(filepath.FromSlash(relativePath)) != "" {
-		return nil, "", 0, nil, errors.New("relative_path must name a file inside the configured upload root")
+		return nil, 0, errors.New("relative_path must name a file inside the configured upload root")
 	}
-	rootPath, err := filepath.Abs(h.cfg.uploadRoot)
+	// A relative root would resolve against whatever working directory the MCP
+	// host chose, so the confinement boundary would depend on the host.
+	if !filepath.IsAbs(h.cfg.uploadRoot) {
+		return nil, 0, fmt.Errorf("%s must be an absolute path", uploadRootEnv)
+	}
+	root, err := os.OpenRoot(h.cfg.uploadRoot)
 	if err != nil {
-		return nil, "", 0, nil, errors.New("cannot resolve configured upload root")
+		return nil, 0, fmt.Errorf("cannot open configured upload root: %w", pathErrorCause(err))
 	}
-	root, err := os.OpenRoot(rootPath)
+	defer func() { _ = root.Close() }()
+	f, err := root.OpenFile(filepath.FromSlash(relativePath), uploadOpenFlag, 0)
 	if err != nil {
-		return nil, "", 0, nil, errors.New("cannot open configured upload root")
+		return nil, 0, fmt.Errorf("cannot open relative_path inside the configured upload root: %w", pathErrorCause(err))
 	}
-	f, err := root.Open(filepath.FromSlash(relativePath))
+	info, err := f.Stat()
 	if err != nil {
-		_ = root.Close()
-		return nil, "", 0, nil, errors.New("cannot open file inside configured upload root")
-	}
-	stat, err := f.Stat()
-	if err != nil || !stat.Mode().IsRegular() {
 		_ = f.Close()
-		_ = root.Close()
-		return nil, "", 0, nil, errors.New("relative_path must refer to a regular file")
+		return nil, 0, fmt.Errorf("cannot inspect relative_path: %w", pathErrorCause(err))
 	}
-	if stat.Size() <= 0 {
+	if err := checkUploadable(info); err != nil {
 		_ = f.Close()
-		_ = root.Close()
-		return nil, "", 0, nil, errors.New("empty files cannot be uploaded")
+		return nil, 0, err
 	}
-	if stat.Size() > maxUploadBytes {
-		_ = f.Close()
-		_ = root.Close()
-		return nil, "", 0, nil, fmt.Errorf("file exceeds the 1 GiB upload limit")
+	return f, info.Size(), nil
+}
+
+// checkUploadable enforces what this tool uploads: a non-empty regular file of
+// at most maxUploadBytes.
+func checkUploadable(info fs.FileInfo) error {
+	switch {
+	case !info.Mode().IsRegular():
+		return errors.New("relative_path must refer to a regular file")
+	case info.Size() == 0:
+		return errors.New("empty files cannot be uploaded")
+	case info.Size() > maxUploadBytes:
+		return errors.New("file exceeds the 1 GiB upload limit")
 	}
-	return f, filepath.Base(relativePath), stat.Size(), func() {
-		_ = f.Close()
-		_ = root.Close()
-	}, nil
+	return nil
+}
+
+// pathErrorCause drops the path from an os.Root error so the result names the
+// cause (missing file, permission, or a path that escapes the root) without
+// echoing filesystem paths.
+func pathErrorCause(err error) error {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err
+	}
+	return err
 }
 
 func validateSlackUploadURL(raw, workspace string) error {
@@ -222,20 +248,27 @@ func validateSlackUploadURL(raw, workspace string) error {
 	return nil
 }
 
+// uploadTimeout returns the deadline for transferring size bytes.
+func uploadTimeout(size int64) time.Duration {
+	return uploadBaseTimeout + time.Duration(size/minUploadBytesPerSecond)*time.Second
+}
+
+// uploadClient returns a client for the credential-free byte transfer. It never
+// follows redirects, so the bytes cannot be re-sent to another host. The
+// transfer deadline comes from the request context (see uploadFile).
 func (h *handlers) uploadClient() *http.Client {
-	client := &http.Client{Timeout: slackUploadTimeout}
+	client := &http.Client{}
 	if h.httpClient != nil {
-		copy := *h.httpClient
-		client = &copy
-		if client.Timeout == 0 {
-			client.Timeout = slackUploadTimeout
-		}
+		injected := *h.httpClient
+		client = &injected
 	}
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	return client
 }
 
 func (h *handlers) uploadFile(ctx context.Context, uploadURL string, file io.Reader, size int64) error {
+	ctx, cancel := context.WithTimeout(ctx, uploadTimeout(size))
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, file)
 	if err != nil {
 		return errors.New("could not create Slack file transfer request")
@@ -245,7 +278,7 @@ func (h *handlers) uploadFile(ctx context.Context, uploadURL string, file io.Rea
 	req.Header.Set("User-Agent", "slacktokens-mcp/"+version)
 	resp, err := h.uploadClient().Do(req)
 	if err != nil {
-		return errors.New("Slack file transfer failed")
+		return fmt.Errorf("Slack file transfer failed: %w", transferErrorCause(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxUploadErrorBytes))
@@ -253,6 +286,17 @@ func (h *handlers) uploadFile(ctx context.Context, uploadURL string, file io.Rea
 		return fmt.Errorf("Slack file transfer failed with HTTP status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// transferErrorCause drops the request URL from a client error. *url.Error
+// embeds the temporary upload URL in its message, and that URL must never
+// reach the AI.
+func transferErrorCause(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
+	}
+	return err
 }
 
 func slackMethodFailure(operation, body string) error {

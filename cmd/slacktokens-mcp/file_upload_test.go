@@ -6,12 +6,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hishamkaram/slacktokens"
 )
@@ -159,10 +161,92 @@ func TestOpenUploadFileRejectsSymlinkEscape(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	h := &handlers{cfg: mcpConfig{uploadRoot: root}}
-	if f, _, _, closeFile, err := h.openUploadFile("link.txt"); err == nil {
-		closeFile()
+	if f, _, err := h.openUploadFile("link.txt"); err == nil {
 		f.Close()
 		t.Fatal("opened a symlink that escapes the configured upload root")
+	}
+}
+
+func TestOpenUploadFileRejectsNonRegularAndOutOfRangeSizes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "empty.txt"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Sparse files make the 1 GiB boundary cheap to exercise.
+	for name, size := range map[string]int64{"limit.bin": maxUploadBytes, "over.bin": maxUploadBytes + 1} {
+		f, err := os.Create(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	h := &handlers{cfg: mcpConfig{uploadRoot: root}}
+	for _, path := range []string{"dir", "empty.txt", "over.bin", "missing.txt"} {
+		if f, _, err := h.openUploadFile(path); err == nil {
+			f.Close()
+			t.Errorf("openUploadFile(%q) succeeded, want error", path)
+		}
+	}
+	f, size, err := h.openUploadFile("limit.bin")
+	if err != nil {
+		t.Fatalf("openUploadFile at the 1 GiB limit: %v", err)
+	}
+	f.Close()
+	if size != maxUploadBytes {
+		t.Fatalf("size = %d, want %d", size, maxUploadBytes)
+	}
+}
+
+func TestOpenUploadFileRequiresAbsoluteRoot(t *testing.T) {
+	h := &handlers{cfg: mcpConfig{uploadRoot: "relative-root"}}
+	if f, _, err := h.openUploadFile("ok.txt"); err == nil {
+		f.Close()
+		t.Fatal("accepted a relative upload root")
+	} else if !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("error = %v, want absolute-path guidance", err)
+	}
+}
+
+func TestSlackFileUploadTransferErrorOmitsUploadURL(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/api/files.getUploadURLExternal" {
+			return response(req, 200, `{"ok":true,"upload_url":"https://files.slack.com/upload/v1/secret-ticket","file_id":"F123"}`), nil
+		}
+		return nil, errors.New("connection reset by peer")
+	})}
+	h := &handlers{
+		cfg:        mcpConfig{allowWrite: true, uploadRoot: root},
+		credsFn:    func() (slacktokens.Result, error) { return testResult(), nil },
+		httpClient: client,
+		baseURLStr: "https://api.test/api/",
+	}
+	res, _, err := h.slackFileUpload(context.Background(), nil, slackFileUploadInput{RelativePath: "ok.txt", ChannelID: "C123"})
+	if err != nil || res == nil || !res.IsError {
+		t.Fatalf("result=%v err=%v, want transfer error", res, err)
+	}
+	serialized, _ := json.Marshal(res)
+	if strings.Contains(string(serialized), "secret-ticket") || strings.Contains(string(serialized), "upload/v1") {
+		t.Fatalf("upload URL reached tool result: %s", serialized)
+	}
+	if !strings.Contains(string(serialized), "connection reset by peer") {
+		t.Fatalf("transfer error lost its cause: %s", serialized)
+	}
+}
+
+func TestUploadTimeoutAllowsMaxFileOnSlowLink(t *testing.T) {
+	// A 1 GiB file at the minimum supported rate of 512 KiB/s needs 2048 s.
+	if got, want := uploadTimeout(maxUploadBytes), 2048*time.Second; got < want {
+		t.Fatalf("uploadTimeout(1 GiB) = %v, want at least %v", got, want)
 	}
 }
 

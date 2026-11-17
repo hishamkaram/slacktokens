@@ -88,7 +88,7 @@ func TestListTools_OnlyCredentialSafeTools(t *testing.T) {
 	for _, tt := range list.Tools {
 		if tt.Name == "slack_file_upload" {
 			if tt.Annotations == nil || tt.InputSchema == nil || tt.OutputSchema == nil || tt.Description == "" {
-				t.Errorf("slack_file_upload: incomplete tool definition")
+				t.Fatalf("slack_file_upload: incomplete tool definition")
 			}
 			if tt.Annotations.OpenWorldHint == nil || !*tt.Annotations.OpenWorldHint {
 				t.Errorf("slack_file_upload: OpenWorldHint must be true")
@@ -126,12 +126,13 @@ func TestListTools_WriteGateKeepsCredentialSafeTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(list.Tools) != 2 {
-		names := make([]string, len(list.Tools))
-		for i, tt := range list.Tools {
-			names[i] = tt.Name
-		}
-		t.Fatalf("unexpected tools with writes enabled: %v", names)
+	names := make([]string, len(list.Tools))
+	for i, tt := range list.Tools {
+		names[i] = tt.Name
+	}
+	sort.Strings(names)
+	if !sliceEqual(names, []string{"slack_api_call", "slack_file_upload"}) {
+		t.Fatalf("even with both gates, only slack_api_call and slack_file_upload should exist; got %v", names)
 	}
 }
 

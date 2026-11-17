@@ -89,11 +89,13 @@ func errorResult(err error) *mcp.CallToolResult {
 	}
 }
 
-// proxyAnnotations is for slack_api_call. It reaches the network
-// (OpenWorldHint=true) and can mutate remote state when the write gate is open
-// (ReadOnlyHint=false). DestructiveHint tracks the destructive gate: when it is
-// open the tool can invoke chat.delete/chat.update, so the hint is true and a
-// host should confirm. Each call is a fresh network request, so not idempotent.
+// proxyAnnotations is shared by slack_api_call and slack_file_upload. It
+// reaches the network (OpenWorldHint=true) and can mutate remote state when the
+// write gate is open (ReadOnlyHint=false). DestructiveHint tracks the
+// destructive gate: when it is open slack_api_call can invoke
+// chat.delete/chat.update, so the hint is true and a host should confirm.
+// slack_file_upload only adds content, so it always passes false. Each call is
+// a fresh network request, so not idempotent.
 func proxyAnnotations(title string, destructive bool) *mcp.ToolAnnotations {
 	falsePtr := false
 	truePtr := true
@@ -176,11 +178,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := newServerWithConfig(mcpConfig{
-		allowWrite:       allowWriteFromEnv(),
-		allowDestructive: allowDestructiveFromEnv(),
-		uploadRoot:       os.Getenv(uploadRootEnv),
-	})
+	server := newServer()
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 		return err

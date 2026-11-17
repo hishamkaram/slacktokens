@@ -237,7 +237,7 @@ Omit the `env` block for read-only. Use the binary's absolute path for `command`
 | --- | --- | --- |
 | `SLACKTOKENS_MCP_ALLOW_WRITE` | unset | Enables the additive write methods on `slack_api_call` and the `slack_file_upload` tool. |
 | `SLACKTOKENS_MCP_ALLOW_DESTRUCTIVE` | unset | **Together with** `SLACKTOKENS_MCP_ALLOW_WRITE`, enables destructive methods (`chat.delete`, `chat.update`) on `slack_api_call`. Both keys required. |
-| `SLACKTOKENS_MCP_UPLOAD_ROOT` | unset | Limits `slack_file_upload` to relative paths under this directory. Required for file uploads. |
+| `SLACKTOKENS_MCP_UPLOAD_ROOT` | unset | Absolute path of the only directory `slack_file_upload` may read from; tool paths are relative to it. Required for file uploads. |
 | `SLACKTOKENS_PROFILE_DIR` | unset | Overrides Slack profile-directory discovery (trusted/test-only: opened directly). |
 
 Both gates are enabled only when their value is **exactly `1`** — any other value, including padded strings such as `" 1 "`, leaves them disabled (fail-closed).
