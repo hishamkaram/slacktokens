@@ -339,7 +339,7 @@ func TestSlackFileUploadDoesNotFollowUploadRedirect(t *testing.T) {
 }
 
 func TestSlackMethodFailureOnlyReturnsSafeErrorCodes(t *testing.T) {
-	if got := slackMethodFailure("share uploaded file", `{"ok":false,"error":"missing_scope"}`).Error(); got != "Slack could not share uploaded file: missing_scope" {
+	if got := slackMethodFailure("share uploaded file", `{"ok":false,"error":"missing_scope"}`).Error(); got != "slack could not share uploaded file: missing_scope" {
 		t.Fatalf("safe API error = %q", got)
 	}
 	if got := slackMethodFailure("share uploaded file", `{"ok":false,"error":"private detail"}`).Error(); strings.Contains(got, "private detail") {

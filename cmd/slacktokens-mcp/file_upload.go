@@ -136,10 +136,10 @@ func (h *handlers) slackFileUpload(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 	var ticket slackUploadTicket
 	if err := json.Unmarshal([]byte(getOut.Body), &ticket); err != nil || ticket.UploadURL == "" || ticket.FileID == "" {
-		return errorResult(errors.New("Slack returned an invalid upload ticket")), slackFileUploadOutput{}, nil
+		return errorResult(errors.New("slack returned an invalid upload ticket")), slackFileUploadOutput{}, nil
 	}
 	if err := validateSlackUploadURL(ticket.UploadURL, getOut.Workspace); err != nil {
-		return errorResult(errors.New("Slack returned an untrusted upload URL")), slackFileUploadOutput{}, nil
+		return errorResult(errors.New("slack returned an untrusted upload URL")), slackFileUploadOutput{}, nil
 	}
 	if err := h.uploadFile(ctx, ticket.UploadURL, f, size); err != nil {
 		return errorResult(err), slackFileUploadOutput{}, nil
@@ -278,12 +278,12 @@ func (h *handlers) uploadFile(ctx context.Context, uploadURL string, file io.Rea
 	req.Header.Set("User-Agent", "slacktokens-mcp/"+version)
 	resp, err := h.uploadClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("Slack file transfer failed: %w", transferErrorCause(err))
+		return fmt.Errorf("slack file transfer failed: %w", transferErrorCause(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxUploadErrorBytes))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Slack file transfer failed with HTTP status %d", resp.StatusCode)
+		return fmt.Errorf("slack file transfer failed with HTTP status %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -304,10 +304,10 @@ func slackMethodFailure(operation, body string) error {
 	if json.Unmarshal([]byte(body), &apiErr) == nil && apiErr.Error != "" {
 		for _, r := range apiErr.Error {
 			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
-				return fmt.Errorf("Slack could not %s", operation)
+				return fmt.Errorf("slack could not %s", operation)
 			}
 		}
-		return fmt.Errorf("Slack could not %s: %s", operation, apiErr.Error)
+		return fmt.Errorf("slack could not %s: %s", operation, apiErr.Error)
 	}
-	return fmt.Errorf("Slack could not %s", operation)
+	return fmt.Errorf("slack could not %s", operation)
 }
