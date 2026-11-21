@@ -17,10 +17,11 @@
 //
 // SECURITY: a Slack token or auth cookie is a live credential. This server
 // exposes credential-safe tools: slack_api_call is a fail-closed proxy for
-// allowlisted methods, and slack_file_upload keeps the temporary upload URL
-// inside the server. Both inject live credentials server-side; write
-// operations require SLACKTOKENS_MCP_ALLOW_WRITE=1. See proxy.go and
-// file_upload.go.
+// allowlisted methods, slack_file_upload keeps the temporary upload URL inside
+// the server, and slack_file_download fetches a file into a configured
+// directory. All inject live credentials server-side; write operations require
+// SLACKTOKENS_MCP_ALLOW_WRITE=1. See proxy.go, file_upload.go and
+// file_download.go.
 //
 // There is deliberately NO tool that returns or writes raw credentials: a file
 // written as the current user (even mode 0600) is readable by any host tool
@@ -62,6 +63,9 @@ type mcpConfig struct {
 	// uploadRoot limits files the slack_file_upload tool can read. Sourced from
 	// SLACKTOKENS_MCP_UPLOAD_ROOT; an empty value disables local file access.
 	uploadRoot string
+	// downloadRoot is the only directory slack_file_download writes to. Sourced
+	// from SLACKTOKENS_MCP_DOWNLOAD_ROOT; an empty value disables downloads.
+	downloadRoot string
 }
 
 // handlers carries the dependencies shared by every tool handler.
@@ -89,12 +93,12 @@ func errorResult(err error) *mcp.CallToolResult {
 	}
 }
 
-// proxyAnnotations is shared by slack_api_call and slack_file_upload. It
+// proxyAnnotations is shared by slack_api_call and the file tools. It
 // reaches the network (OpenWorldHint=true) and can mutate remote state when the
 // write gate is open (ReadOnlyHint=false). DestructiveHint tracks the
 // destructive gate: when it is open slack_api_call can invoke
 // chat.delete/chat.update, so the hint is true and a host should confirm.
-// slack_file_upload only adds content, so it always passes false. Each call is
+// The file tools only add content, so they always pass false. Each call is
 // a fresh network request, so not idempotent.
 func proxyAnnotations(title string, destructive bool) *mcp.ToolAnnotations {
 	falsePtr := false
@@ -119,6 +123,7 @@ func newServer() *mcp.Server {
 		allowWrite:       allowWriteFromEnv(),
 		allowDestructive: allowDestructiveFromEnv(),
 		uploadRoot:       os.Getenv(uploadRootEnv),
+		downloadRoot:     os.Getenv(downloadRootEnv),
 	})
 }
 
@@ -154,6 +159,14 @@ func newServerWithConfig(cfg mcpConfig) *mcp.Server {
 		InputSchema: fileUploadInputSchema(),
 		Annotations: proxyAnnotations("Upload and share a local file in Slack", false),
 	}, h.slackFileUpload)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "slack_file_download",
+		Title:       "Download a Slack file to a local directory",
+		Description: fileDownloadToolDescription(cfg),
+		InputSchema: fileDownloadInputSchema(),
+		Annotations: proxyAnnotations("Download a Slack file to a local directory", false),
+	}, h.slackFileDownload)
 
 	return server
 }

@@ -147,6 +147,7 @@ func TestValidateMethod(t *testing.T) {
 		{"write allowed when gated", "chat.postMessage", true, false, false},
 		{"conversations.open allowed when write gated", "conversations.open", true, false, false},
 		{"conversations.open blocked by default", "conversations.open", false, false, true},
+		{"files.info is a read", "files.info", false, false, false},
 		{"unknown method", "files.upload", true, true, true},
 		{"upload ticket stays private", "files.getUploadURLExternal", true, true, true},
 		{"upload completion is tool-only", "files.completeUploadExternal", true, true, true},

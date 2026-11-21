@@ -237,15 +237,21 @@ func validateSlackUploadURL(raw, workspace string) error {
 	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.Port() != "" {
 		return errors.New("invalid URL")
 	}
-	workspaceHost := hostOf(workspace)
-	expectedHost := "files.slack.com"
-	if strings.HasSuffix(workspaceHost, ".slack-gov.com") || workspaceHost == "slack-gov.com" {
-		expectedHost = "files.slack-gov.com"
-	}
-	if !strings.EqualFold(u.Hostname(), expectedHost) || !strings.HasPrefix(u.EscapedPath(), "/upload/v1/") || len(u.EscapedPath()) <= len("/upload/v1/") {
+	if !strings.EqualFold(u.Hostname(), slackFileHost(workspace)) || !strings.HasPrefix(u.EscapedPath(), "/upload/v1/") || len(u.EscapedPath()) <= len("/upload/v1/") {
 		return errors.New("unexpected upload endpoint")
 	}
 	return nil
+}
+
+// slackFileHost returns the Slack file host for the workspace's host family.
+// GovSlack runs on the separate slack-gov.com domain
+// (https://docs.slack.dev/govslack), so its workspaces use files.slack-gov.com;
+// every other workspace uses files.slack.com.
+func slackFileHost(workspace string) string {
+	if host := hostOf(workspace); strings.HasSuffix(host, ".slack-gov.com") || host == "slack-gov.com" {
+		return "files.slack-gov.com"
+	}
+	return "files.slack.com"
 }
 
 // uploadTimeout returns the deadline for transferring size bytes.

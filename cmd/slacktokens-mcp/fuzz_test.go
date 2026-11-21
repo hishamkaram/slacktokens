@@ -5,9 +5,12 @@ package main
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hishamkaram/slacktokens"
 )
@@ -101,6 +104,59 @@ func FuzzValidateSlackUploadURLDialsSlackHost(f *testing.F) {
 		host := strings.ToLower(req.URL.Host)
 		if req.URL.Scheme != "https" || (host != "files.slack.com" && host != "files.slack-gov.com") {
 			t.Fatalf("validator accepted %q, which dials %s://%s", raw, req.URL.Scheme, req.URL.Host)
+		}
+	})
+}
+
+// FuzzValidateSlackFileURLDialsSlackHost checks for parser differentials: a URL
+// the validator accepts must make net/http dial the Slack file host over HTTPS
+// on the default port, so the session cannot be sent elsewhere.
+func FuzzValidateSlackFileURLDialsSlackHost(f *testing.F) {
+	for _, seed := range []string{
+		"https://files.slack.com/files-pri/T1-F1/download/a.pdf",
+		"https://files.slack-gov.com/files-pri/T1-F1/a.pdf",
+		"https://FILES.SLACK.COM/files-pri/T1-F1/a.pdf?x=1",
+		"https://files.slack.com@evil.example/a.pdf",
+		"https://evil.example\\@files.slack.com/a.pdf",
+		"https://files.slack.com:443/a.pdf",
+		"https://files.slack.com./a.pdf",
+		"https://files.slack.com%2eevil.example/a.pdf",
+		"//files.slack.com/a.pdf",
+	} {
+		f.Add(seed, "https://acme.slack.com")
+		f.Add(seed, "https://acme.slack-gov.com")
+	}
+	f.Fuzz(func(t *testing.T, raw, workspace string) {
+		if validateSlackFileURL(raw, workspace) != nil {
+			return
+		}
+		req, err := http.NewRequest(http.MethodGet, raw, nil)
+		if err != nil {
+			t.Fatalf("validator accepted %q but net/http rejects it: %v", raw, err)
+		}
+		host := strings.ToLower(req.URL.Host)
+		if req.URL.Scheme != "https" || (host != "files.slack.com" && host != "files.slack-gov.com") {
+			t.Fatalf("validator accepted %q, which dials %s://%s", raw, req.URL.Scheme, req.URL.Host)
+		}
+	})
+}
+
+// FuzzDownloadFileNameIsOneSafeComponent checks that any Slack file name maps
+// to a single local path component inside the download root.
+func FuzzDownloadFileNameIsOneSafeComponent(f *testing.F) {
+	for _, seed := range []string{"report.pdf", "../../etc/passwd", `..\..\win.ini`, "", "...", "a/b", "C:x", "\x00", "報告書.pdf", "\xff\xfe"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, name string) {
+		got := downloadFileName("F123", name)
+		if got != "F123" && !strings.HasPrefix(got, "F123-") {
+			t.Fatalf("downloadFileName(%q) = %q lost its file ID prefix", name, got)
+		}
+		if !fs.ValidPath(got) || strings.ContainsAny(got, `/\:`) || filepath.Base(got) != got || filepath.IsAbs(got) || filepath.VolumeName(got) != "" {
+			t.Fatalf("downloadFileName(%q) = %q is not one relative path component", name, got)
+		}
+		if len(got) > maxDownloadNameBytes || !utf8.ValidString(got) || strings.HasSuffix(got, ".") || strings.HasSuffix(got, " ") {
+			t.Fatalf("downloadFileName(%q) = %q is not portable", name, got)
 		}
 	})
 }

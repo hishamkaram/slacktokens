@@ -79,7 +79,7 @@ func TestListTools_OnlyCredentialSafeTools(t *testing.T) {
 		got = append(got, tt.Name)
 	}
 	sort.Strings(got)
-	if !sliceEqual(got, []string{"slack_api_call", "slack_file_upload"}) {
+	if !sliceEqual(got, []string{"slack_api_call", "slack_file_download", "slack_file_upload"}) {
 		t.Fatalf("unexpected tool list: %v", got)
 	}
 
@@ -96,15 +96,15 @@ func TestListTools_OnlyCredentialSafeTools(t *testing.T) {
 	}
 
 	for _, tt := range list.Tools {
-		if tt.Name == "slack_file_upload" {
+		if tt.Name == "slack_file_upload" || tt.Name == "slack_file_download" {
 			if tt.Annotations == nil || tt.InputSchema == nil || tt.OutputSchema == nil || tt.Description == "" {
-				t.Fatalf("slack_file_upload: incomplete tool definition")
+				t.Fatalf("%s: incomplete tool definition", tt.Name)
 			}
 			if tt.Annotations.OpenWorldHint == nil || !*tt.Annotations.OpenWorldHint {
-				t.Errorf("slack_file_upload: OpenWorldHint must be true")
+				t.Errorf("%s: OpenWorldHint must be true", tt.Name)
 			}
 			if tt.Annotations.ReadOnlyHint {
-				t.Errorf("slack_file_upload: ReadOnlyHint must be false")
+				t.Errorf("%s: ReadOnlyHint must be false", tt.Name)
 			}
 			continue
 		}
@@ -141,8 +141,8 @@ func TestListTools_WriteGateKeepsCredentialSafeTools(t *testing.T) {
 		names[i] = tt.Name
 	}
 	sort.Strings(names)
-	if !sliceEqual(names, []string{"slack_api_call", "slack_file_upload"}) {
-		t.Fatalf("even with both gates, only slack_api_call and slack_file_upload should exist; got %v", names)
+	if !sliceEqual(names, []string{"slack_api_call", "slack_file_download", "slack_file_upload"}) {
+		t.Fatalf("even with both gates, only the credential-safe tools should exist; got %v", names)
 	}
 }
 

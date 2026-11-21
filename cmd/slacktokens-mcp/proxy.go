@@ -71,6 +71,7 @@ var readMethods = map[string]bool{
 	"search.messages":       true,
 	"team.info":             true,
 	"emoji.list":            true,
+	"files.info":            true,
 }
 
 // writeMethods are allowed ONLY when SLACKTOKENS_MCP_ALLOW_WRITE is set. The
@@ -565,6 +566,36 @@ func sortedKeys(m map[string]slacktokens.Workspace) []string {
 	return keys
 }
 
+// slackSession is the credential material for one resolved workspace. It stays
+// inside this process: callers put it in request headers and never in a result.
+type slackSession struct {
+	workspace string
+	token     string
+	cookie    string
+	secrets   []string
+}
+
+// session resolves live credentials for workspace in-process: the workspace's
+// xoxc token, the Cookie header for its host, and the values to redact.
+func (h *handlers) session(workspace string) (slackSession, error) {
+	r, err := h.credsResult()
+	if err != nil {
+		return slackSession{}, err
+	}
+	wsURL, ws, err := resolveWorkspace(r.Tokens, workspace)
+	if err != nil {
+		return slackSession{}, err
+	}
+	if ws.Token == "" {
+		return slackSession{}, fmt.Errorf("workspace %q has no token", wsURL)
+	}
+	cookie, err := cookieHeader(r.Cookies, wsURL)
+	if err != nil {
+		return slackSession{}, err
+	}
+	return slackSession{workspace: wsURL, token: ws.Token, cookie: cookie, secrets: collectSecrets(r)}, nil
+}
+
 // call performs one authenticated Slack Web API request and shapes the result.
 // It resolves credentials in-process, injects them server-side, and redacts any
 // credential from the response, which never leaves this function.
@@ -575,19 +606,7 @@ func sortedKeys(m map[string]slacktokens.Workspace) []string {
 // only on an infrastructure failure (reported as IsError); a reached-Slack call,
 // including a Slack-level ok:false or an HTTP 429, returns (nil, out).
 func (h *handlers) call(ctx context.Context, workspace, method string, params map[string]any) (*mcp.CallToolResult, slackAPIOutput) {
-	// Resolve live credentials in-process.
-	r, err := h.credsResult()
-	if err != nil {
-		return errorResult(err), slackAPIOutput{}
-	}
-	wsURL, ws, err := resolveWorkspace(r.Tokens, workspace)
-	if err != nil {
-		return errorResult(err), slackAPIOutput{}
-	}
-	if ws.Token == "" {
-		return errorResult(fmt.Errorf("workspace %q has no token", wsURL)), slackAPIOutput{}
-	}
-	cookie, err := cookieHeader(r.Cookies, wsURL)
+	s, err := h.session(workspace)
 	if err != nil {
 		return errorResult(err), slackAPIOutput{}
 	}
@@ -606,13 +625,12 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 	// Build and send. The URL is constrained: baseURL is a constant and the
 	// caller validated `method` (allowlist or typed tool), so it cannot escape
 	// the /api/ path.
-	secrets := collectSecrets(r)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.baseURL(wsURL)+method, strings.NewReader(form.Encode())) // #nosec G107 -- method is validated by the caller (allowlist or typed tool); base is derived from a hardcoded host set.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.baseURL(s.workspace)+method, strings.NewReader(form.Encode())) // #nosec G107 -- method is validated by the caller (allowlist or typed tool); base is derived from a hardcoded host set.
 	if err != nil {
 		return errorResult(fmt.Errorf("build request: %w", err)), slackAPIOutput{}
 	}
-	req.Header.Set("Authorization", "Bearer "+ws.Token)
-	req.Header.Set("Cookie", cookie)
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("Cookie", s.cookie)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "slacktokens-mcp/"+version)
 
@@ -631,13 +649,13 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 
 	out := slackAPIOutput{
 		Status:    resp.StatusCode,
-		Workspace: wsURL,
+		Workspace: s.workspace,
 		Method:    method,
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		// Redact defensively: a response header is scrubbed exactly like the body
 		// so a reflected credential can never ride out via Retry-After.
-		out.RetryAfter = redactSecrets(resp.Header.Get("Retry-After"), secrets)
+		out.RetryAfter = redactSecrets(resp.Header.Get("Retry-After"), s.secrets)
 	}
 
 	// Oversized responses are NOT returned as a truncated slice: a partial body
@@ -654,7 +672,7 @@ func (h *handlers) call(ctx context.Context, workspace, method string, params ma
 
 	// Complete response: redact credentials (and their encoding variants) in
 	// full before the body enters the model context, then parse Slack's ok flag.
-	out.Body = redactSecrets(string(data), secrets)
+	out.Body = redactSecrets(string(data), s.secrets)
 	var probe struct {
 		OK bool `json:"ok"`
 	}
