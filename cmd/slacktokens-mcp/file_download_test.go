@@ -7,7 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -226,7 +230,11 @@ func TestValidateSlackFileURL(t *testing.T) {
 	}{
 		{"commercial", testFileURL, "https://acme.slack.com", false},
 		{"enterprise workspace", testFileURL, "https://acme.enterprise.slack.com", false},
+		{"origin", "https://files-origin.slack.com/files-pri/T1-F1/download/a.pdf", "https://acme.slack.com", false},
 		{"gov", "https://files.slack-gov.com/files-pri/T1-F1/a.pdf", "https://acme.slack-gov.com", false},
+		{"origin for gov", "https://files-origin.slack.com/files-pri/T1-F1/a.pdf", "https://acme.slack-gov.com", true},
+		{"guessed gov origin", "https://files-origin.slack-gov.com/files-pri/T1-F1/a.pdf", "https://acme.slack-gov.com", true},
+		{"origin look-alike", "https://files-origin.slack.com.evil.example/a.pdf", "https://acme.slack.com", true},
 		{"upper-case host", "https://FILES.SLACK.COM/files-pri/T1-F1/a.pdf", "https://acme.slack.com", false},
 		{"wrong host", "https://evil.example/files-pri/T1-F1/a.pdf", "https://acme.slack.com", true},
 		{"api host", "https://slack.com/files-pri/T1-F1/a.pdf", "https://acme.slack.com", true},
@@ -252,30 +260,33 @@ func TestValidateSlackFileURL(t *testing.T) {
 	}
 }
 
-func TestSlackFileDownloadFollowsRedirectOnSlackFileHost(t *testing.T) {
+// TestSlackFileDownloadFollowsRedirectToFilesOrigin mirrors what Slack does:
+// files.slack.com answers with a 302 to files-origin.slack.com. Go drops the
+// session headers on that cross-host hop, so the tool must set them again.
+func TestSlackFileDownloadFollowsRedirectToFilesOrigin(t *testing.T) {
 	root := t.TempDir()
-	var hops []string
+	var hosts []string
 	h := downloadHandler(root, func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host == "api.test" {
 			return response(req, 200, fileInfoBody(testFileURL)), nil
 		}
-		hops = append(hops, req.URL.Path)
-		if req.Header.Get("Authorization") != "Bearer "+testXOXC || req.Header.Get("Cookie") == "" {
-			t.Errorf("hop %s lost the session", req.URL.Path)
+		hosts = append(hosts, req.URL.Host)
+		if req.Header.Get("Authorization") != "Bearer "+testXOXC || req.Header.Get("Cookie") != "d="+testXOXD+"; d-s=123" {
+			t.Errorf("request to %s lost the session", req.URL.Host)
 		}
-		if req.URL.Path == "/moved/report.pdf" {
+		if req.URL.Host == "files-origin.slack.com" {
 			return response(req, 200, "%PDF-1.7"), nil
 		}
 		resp := response(req, http.StatusFound, "")
-		resp.Header.Set("Location", "https://files.slack.com/moved/report.pdf")
+		resp.Header.Set("Location", "https://files-origin.slack.com"+req.URL.Path)
 		return resp, nil
 	})
 	res, out, err := h.slackFileDownload(context.Background(), nil, slackFileDownloadInput{FileID: "F123"})
 	if err != nil || res != nil {
 		t.Fatalf("slackFileDownload returned result=%v err=%v", res, err)
 	}
-	if len(hops) != 2 || out.Size != 8 {
-		t.Fatalf("hops = %v, output = %+v", hops, out)
+	if strings.Join(hosts, ",") != "files.slack.com,files-origin.slack.com" || out.Size != 8 {
+		t.Fatalf("hosts = %v, output = %+v", hosts, out)
 	}
 }
 
@@ -285,6 +296,7 @@ func TestSlackFileDownloadRefusesRedirectOffSlackFileHost(t *testing.T) {
 		"http://files.slack.com/files-pri/T1-F123/report.pdf",
 		"https://files.slack.com.evil.example/collect",
 		"https://files.slack.com:8443/collect",
+		"https://slack.com/collect",
 	} {
 		t.Run(location, func(t *testing.T) {
 			root := t.TempDir()
@@ -435,8 +447,8 @@ func TestSaveDownloadEnforcesLimitAndLeavesNoPartialFile(t *testing.T) {
 	if n, err := saveDownload(root, "F123-a.txt", strings.NewReader("1234"), 4); err != nil || n != 4 {
 		t.Fatalf("saveDownload at the limit = %d, %v", n, err)
 	}
-	if _, err := saveDownload(root, "F123-b.txt", strings.NewReader("12345"), 4); err == nil || !strings.Contains(err.Error(), "1 GiB") {
-		t.Fatalf("saveDownload over the limit error = %v", err)
+	if _, err := saveDownload(root, "F123-b.txt", strings.NewReader("12345"), 4); err == nil {
+		t.Fatal("saveDownload accepted a body over the limit")
 	}
 	if _, err := saveDownload(root, "F123-c.txt", &failingReader{}, 4); err == nil {
 		t.Fatal("saveDownload ignored a read error")
@@ -449,6 +461,71 @@ func TestSaveDownloadEnforcesLimitAndLeavesNoPartialFile(t *testing.T) {
 type failingReader struct{}
 
 func (*failingReader) Read([]byte) (int, error) { return 0, errors.New("stream broke") }
+
+// TestSlackFileDownloadRedactsReflectedCredentialInError: net/http quotes a
+// malformed Location header in its error, so a file host that reflected the
+// session into one must not get it into the tool result.
+func TestSlackFileDownloadRedactsReflectedCredentialInError(t *testing.T) {
+	h := downloadHandler(t.TempDir(), func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "api.test" {
+			return response(req, 200, fileInfoBody(testFileURL)), nil
+		}
+		resp := response(req, http.StatusFound, "")
+		resp.Header.Set("Location", "https://files.slack.com/%zz?t="+testXOXC+"&d="+url.QueryEscape(testXOXD))
+		return resp, nil
+	})
+	res, _, err := h.slackFileDownload(context.Background(), nil, slackFileDownloadInput{FileID: "F123"})
+	if err != nil || res == nil || !res.IsError {
+		t.Fatalf("result=%v err=%v, want tool error", res, err)
+	}
+	serialized, _ := json.Marshal(res)
+	if !strings.Contains(string(serialized), "Location") {
+		t.Fatalf("error lost its cause: %s", serialized)
+	}
+	assertNoSecrets(t, res)
+	if strings.Contains(string(serialized), url.QueryEscape(testXOXD)) {
+		t.Fatalf("URL-encoded credential reached tool result: %s", serialized)
+	}
+}
+
+// TestSlackFileDownloadTruncatedBodyKeepsEarlierCopy runs the transfer through a
+// real HTTP server and transport: a body cut short of its Content-Length must
+// fail, leave no temporary file, and keep the earlier download.
+func TestSlackFileDownloadTruncatedBodyKeepsEarlierCopy(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "8")
+		_, _ = io.WriteString(w, "%PDF")
+		w.(http.Flusher).Flush() // send the headers and part of the body, then cut
+		panic(http.ErrAbortHandler)
+	}))
+	defer srv.Close()
+	fileHost := srv.Client().Transport.(*http.Transport).Clone()
+	fileHost.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+	}
+	fileHost.TLSClientConfig.ServerName = "example.com" // a name in httptest's certificate
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "F123-report.pdf"), []byte("earlier"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := downloadHandler(root, func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "api.test" {
+			return response(req, 200, fileInfoBody(testFileURL)), nil
+		}
+		return fileHost.RoundTrip(req)
+	})
+	res, _, err := h.slackFileDownload(context.Background(), nil, slackFileDownloadInput{FileID: "F123"})
+	if err != nil || res == nil || !res.IsError {
+		t.Fatalf("result=%v err=%v, want tool error", res, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "F123-report.pdf")); string(got) != "earlier" {
+		t.Fatalf("earlier copy = %q after a truncated download", got)
+	}
+	if names := rootEntries(t, root); len(names) != 1 {
+		t.Fatalf("download root holds %v, want only the earlier copy", names)
+	}
+}
 
 func TestDownloadFileName(t *testing.T) {
 	long := strings.Repeat("報", 100) + ".pdf"

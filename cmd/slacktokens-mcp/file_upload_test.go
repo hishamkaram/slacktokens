@@ -243,10 +243,10 @@ func TestSlackFileUploadTransferErrorOmitsUploadURL(t *testing.T) {
 	}
 }
 
-func TestUploadTimeoutAllowsMaxFileOnSlowLink(t *testing.T) {
+func TestTransferTimeoutAllowsMaxFileOnSlowLink(t *testing.T) {
 	// A 1 GiB file at the minimum supported rate of 512 KiB/s needs 2048 s.
-	if got, want := uploadTimeout(maxUploadBytes), 2048*time.Second; got < want {
-		t.Fatalf("uploadTimeout(1 GiB) = %v, want at least %v", got, want)
+	if got, want := transferTimeout(maxUploadBytes), 2048*time.Second; got < want {
+		t.Fatalf("transferTimeout(1 GiB) = %v, want at least %v", got, want)
 	}
 }
 

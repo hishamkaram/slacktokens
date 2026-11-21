@@ -142,7 +142,9 @@ func (h *handlers) slackFileDownload(ctx context.Context, _ *mcp.CallToolRequest
 	name := downloadFileName(file.ID, file.Name)
 	size, err := h.downloadFile(ctx, root, sess, fileURL, name, file.Mimetype, file.Size)
 	if err != nil {
-		return errorResult(err), slackFileDownloadOutput{}, nil
+		// net/http can quote response text in an error (a malformed Location
+		// header, for one), so redact it like any other Slack response.
+		return errorResult(errors.New(redactSecrets(err.Error(), sess.secrets))), slackFileDownloadOutput{}, nil
 	}
 	return nil, slackFileDownloadOutput{
 		OK:        true,
@@ -163,17 +165,38 @@ func (h *handlers) slackFileDownload(ctx context.Context, _ *mcp.CallToolRequest
 // (https://docs.slack.dev/messaging/working-with-files#downloading-files).
 func validateSlackFileURL(raw, workspace string) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || !strings.EqualFold(u.Hostname(), slackFileHost(workspace)) {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || !isSlackDownloadHost(u.Hostname(), workspace) {
 		return errors.New("untrusted file URL")
 	}
 	return nil
 }
 
+// isSlackDownloadHost reports whether host may receive the session for a file
+// download. files.slack.com answers a file URL with a 302 to
+// files-origin.slack.com, which then serves the file; Slack's docs do not
+// mention that host, so the pair comes from observation (2026-11) and matches
+// what other Slack clients allow. No GovSlack origin host is known, so GovSlack
+// workspaces use only the file host uploads use, and a redirect elsewhere
+// fails closed. Uploads keep their single host (see validateSlackUploadURL).
+func isSlackDownloadHost(host, workspace string) bool {
+	fileHost := slackFileHost(workspace)
+	return strings.EqualFold(host, fileHost) || (fileHost == "files.slack.com" && strings.EqualFold(host, "files-origin.slack.com"))
+}
+
+// setSession puts the session on a request to a validated Slack file host.
+func setSession(req *http.Request, sess slackSession) {
+	req.Header.Set("Authorization", "Bearer "+sess.token)
+	req.Header.Set("Cookie", sess.cookie)
+}
+
 // downloadClient returns a client for the credentialed file fetch. A redirect
-// is followed only to a URL validateSlackFileURL accepts; CheckRedirect runs
+// is followed only to a URL validateSlackFileURL accepts. CheckRedirect runs
 // before the next request is sent, so the session is never sent anywhere else.
-// The transfer deadline comes from the request context (see downloadFile).
-func (h *handlers) downloadClient(workspace string) *http.Client {
+// Go drops Authorization and Cookie on a redirect to another host, including
+// files.slack.com to files-origin.slack.com, so a validated hop gets the
+// session again. The transfer deadline comes from the request context (see
+// downloadFile).
+func (h *handlers) downloadClient(sess slackSession) *http.Client {
 	client := &http.Client{}
 	if h.httpClient != nil {
 		injected := *h.httpClient
@@ -183,9 +206,10 @@ func (h *handlers) downloadClient(workspace string) *http.Client {
 		if len(via) >= maxDownloadHops {
 			return errors.New("too many redirects")
 		}
-		if validateSlackFileURL(req.URL.String(), workspace) != nil {
-			return errors.New("refused a redirect away from the Slack file host")
+		if validateSlackFileURL(req.URL.String(), sess.workspace) != nil {
+			return errors.New("refused a redirect away from Slack's file hosts")
 		}
+		setSession(req, sess)
 		return nil
 	}
 	return client
@@ -194,36 +218,41 @@ func (h *handlers) downloadClient(workspace string) *http.Client {
 // downloadFile fetches fileURL with the session and saves the body as name in
 // root. Slack's own size for the file only scales the deadline.
 func (h *handlers) downloadFile(ctx context.Context, root *os.Root, sess slackSession, fileURL, name, mimetype string, size int64) (int64, error) {
-	ctx, cancel := context.WithTimeout(ctx, uploadTimeout(size))
+	ctx, cancel := context.WithTimeout(ctx, transferTimeout(size))
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
 		return 0, errors.New("could not create Slack file download request")
 	}
-	req.Header.Set("Authorization", "Bearer "+sess.token)
-	req.Header.Set("Cookie", sess.cookie)
+	setSession(req, sess)
 	req.Header.Set("User-Agent", "slacktokens-mcp/"+version)
-	resp, err := h.downloadClient(sess.workspace).Do(req)
+	resp, err := h.downloadClient(sess).Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("slack file download failed: %w", transferErrorCause(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return 0, fmt.Errorf("slack file download failed with HTTP status %d; check the file_id and that the signed-in user can see the file", resp.StatusCode)
+	default:
 		return 0, fmt.Errorf("slack file download failed with HTTP status %d", resp.StatusCode)
 	}
-	// A session Slack does not accept for the file can get a web page with
-	// HTTP 200 instead of the bytes. Saving it under the file's name would hand
-	// the AI the wrong content.
+	// Slack's docs do not say what a file request it does not accept returns.
+	// Without a session, files-origin.slack.com answers 404 text/html (caught
+	// above). This guards the undocumented case of a web page sent with HTTP 200:
+	// saving it under the file's name would hand the AI the wrong content.
 	if got, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); got == "text/html" && mimetype != "text/html" {
 		return 0, errors.New("slack returned a web page instead of the file; the signed-in session may not have access to it")
 	}
 	return saveDownload(root, name, resp.Body, maxDownloadBytes)
 }
 
-// saveDownload streams r into name inside root. The bytes go to a new temporary
-// file first and are renamed into place only when complete and within limit, so
-// a failed download leaves no partial file. os.Root confines both names to the
-// root, and O_EXCL never opens an existing file or symlink.
+// saveDownload streams r into name inside root. The bytes go to a new hidden
+// temporary file first and are renamed into place only when complete and within
+// limit, so a failed download never leaves a partial file under name and keeps
+// any earlier copy. os.Root confines both names to the root, and O_EXCL never
+// opens an existing file or symlink.
 func saveDownload(root *os.Root, name string, r io.Reader, limit int64) (int64, error) {
 	tmp := "." + rand.Text() + ".part"
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)

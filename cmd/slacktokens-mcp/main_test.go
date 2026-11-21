@@ -106,6 +106,10 @@ func TestListTools_OnlyCredentialSafeTools(t *testing.T) {
 			if tt.Annotations.ReadOnlyHint {
 				t.Errorf("%s: ReadOnlyHint must be false", tt.Name)
 			}
+			// A download replaces an earlier copy of the same file.
+			if wantDestructive := tt.Name == "slack_file_download"; tt.Annotations.DestructiveHint == nil || *tt.Annotations.DestructiveHint != wantDestructive {
+				t.Errorf("%s: DestructiveHint must be %v", tt.Name, wantDestructive)
+			}
 			continue
 		}
 		if tt.Name != "slack_api_call" {

@@ -28,11 +28,11 @@ const (
 	slackFileComplete   = "files.completeUploadExternal"
 	maxUploadBytes      = int64(1 << 30)
 	maxUploadErrorBytes = 4096
-	// uploadBaseTimeout plus size/minUploadBytesPerSecond bounds one file
+	// transferBaseTimeout plus size/minTransferBytesPerSecond bounds one file
 	// transfer, so a large file on a slow link is not cut off by a fixed limit
 	// while a stalled transfer still ends.
-	uploadBaseTimeout       = 2 * time.Minute
-	minUploadBytesPerSecond = int64(512 << 10)
+	transferBaseTimeout       = 2 * time.Minute
+	minTransferBytesPerSecond = int64(512 << 10)
 )
 
 type slackFileUploadInput struct {
@@ -254,9 +254,9 @@ func slackFileHost(workspace string) string {
 	return "files.slack.com"
 }
 
-// uploadTimeout returns the deadline for transferring size bytes.
-func uploadTimeout(size int64) time.Duration {
-	return uploadBaseTimeout + time.Duration(size/minUploadBytesPerSecond)*time.Second
+// transferTimeout returns the deadline for uploading or downloading size bytes.
+func transferTimeout(size int64) time.Duration {
+	return transferBaseTimeout + time.Duration(size/minTransferBytesPerSecond)*time.Second
 }
 
 // uploadClient returns a client for the credential-free byte transfer. It never
@@ -273,7 +273,7 @@ func (h *handlers) uploadClient() *http.Client {
 }
 
 func (h *handlers) uploadFile(ctx context.Context, uploadURL string, file io.Reader, size int64) error {
-	ctx, cancel := context.WithTimeout(ctx, uploadTimeout(size))
+	ctx, cancel := context.WithTimeout(ctx, transferTimeout(size))
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, file)
 	if err != nil {

@@ -98,8 +98,9 @@ func errorResult(err error) *mcp.CallToolResult {
 // write gate is open (ReadOnlyHint=false). DestructiveHint tracks the
 // destructive gate: when it is open slack_api_call can invoke
 // chat.delete/chat.update, so the hint is true and a host should confirm.
-// The file tools only add content, so they always pass false. Each call is
-// a fresh network request, so not idempotent.
+// slack_file_upload only adds content, so it passes false. slack_file_download
+// replaces an earlier download of the same file, so it passes true. Each call
+// is a fresh network request, so not idempotent.
 func proxyAnnotations(title string, destructive bool) *mcp.ToolAnnotations {
 	falsePtr := false
 	truePtr := true
@@ -165,7 +166,7 @@ func newServerWithConfig(cfg mcpConfig) *mcp.Server {
 		Title:       "Download a Slack file to a local directory",
 		Description: fileDownloadToolDescription(cfg),
 		InputSchema: fileDownloadInputSchema(),
-		Annotations: proxyAnnotations("Download a Slack file to a local directory", false),
+		Annotations: proxyAnnotations("Download a Slack file to a local directory", true),
 	}, h.slackFileDownload)
 
 	return server

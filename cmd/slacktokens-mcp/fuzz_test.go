@@ -109,11 +109,12 @@ func FuzzValidateSlackUploadURLDialsSlackHost(f *testing.F) {
 }
 
 // FuzzValidateSlackFileURLDialsSlackHost checks for parser differentials: a URL
-// the validator accepts must make net/http dial the Slack file host over HTTPS
-// on the default port, so the session cannot be sent elsewhere.
+// the validator accepts must make net/http dial a Slack file host over HTTPS on
+// the default port, so the session cannot be sent elsewhere.
 func FuzzValidateSlackFileURLDialsSlackHost(f *testing.F) {
 	for _, seed := range []string{
 		"https://files.slack.com/files-pri/T1-F1/download/a.pdf",
+		"https://files-origin.slack.com/files-pri/T1-F1/download/a.pdf",
 		"https://files.slack-gov.com/files-pri/T1-F1/a.pdf",
 		"https://FILES.SLACK.COM/files-pri/T1-F1/a.pdf?x=1",
 		"https://files.slack.com@evil.example/a.pdf",
@@ -135,7 +136,7 @@ func FuzzValidateSlackFileURLDialsSlackHost(f *testing.F) {
 			t.Fatalf("validator accepted %q but net/http rejects it: %v", raw, err)
 		}
 		host := strings.ToLower(req.URL.Host)
-		if req.URL.Scheme != "https" || (host != "files.slack.com" && host != "files.slack-gov.com") {
+		if req.URL.Scheme != "https" || (host != "files.slack.com" && host != "files-origin.slack.com" && host != "files.slack-gov.com") {
 			t.Fatalf("validator accepted %q, which dials %s://%s", raw, req.URL.Scheme, req.URL.Host)
 		}
 	})
